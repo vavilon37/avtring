@@ -23,7 +23,7 @@ async def main():
     if not token:
         raise RuntimeError("BOT_TOKEN не задан в .env файле")
 
-    interval = int(os.getenv("CHECK_INTERVAL", "60"))
+    interval = int(os.getenv("CHECK_INTERVAL", "30"))
 
     await init_db()
 
