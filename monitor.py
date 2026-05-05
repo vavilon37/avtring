@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 from aiogram import Bot
 
 import database as db
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class Monitor:
-    def __init__(self, bot: Bot, interval: int = 60):
+    def __init__(self, bot: Bot, interval: int = 15):
         self.bot = bot
         self.interval = interval
         self._parser = AvitoParser()
@@ -38,7 +39,8 @@ class Monitor:
         await asyncio.sleep(3)
         while self._running:
             await self._tick()
-            await asyncio.sleep(self.interval)
+            jitter = random.uniform(-3, 3)
+            await asyncio.sleep(max(5, self.interval + jitter))
 
     async def _tick(self):
         watches = await db.get_all_watches()
