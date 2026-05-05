@@ -1,12 +1,24 @@
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 from dotenv import load_dotenv
 
 from aiogram import Bot
 from bot import make_bot
 from database import init_db
 from monitor import Monitor
+
+
+def install_chromium():
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(result.stdout)
+        print(result.stderr)
 
 load_dotenv()
 
@@ -25,6 +37,7 @@ async def main():
 
     interval = int(os.getenv("CHECK_INTERVAL", "60"))
 
+    install_chromium()
     await init_db()
 
     bot, dp = make_bot(token)
