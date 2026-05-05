@@ -20,8 +20,7 @@ from filters import (
 logger = logging.getLogger(__name__)
 MAX_WATCHES_PER_USER = 10
 
-# Текст кнопок главного меню
-BTN_ADD = "➕ Добавить поиск"
+BTN_ADD  = "➕ Добавить поиск"
 BTN_LIST = "📋 Мои поиски"
 BTN_STOP = "🗑 Удалить поиск"
 BTN_HELP = "❓ Помощь"
@@ -30,45 +29,44 @@ BTN_HELP = "❓ Помощь"
 # ── FSM ──────────────────────────────────────────────────────────────────────
 
 class AddWatch(StatesGroup):
-    model = State()
+    model     = State()
     price_min = State()
     price_max = State()
     condition = State()
-    seller = State()
-    city = State()
+    seller    = State()
+    city      = State()
 
 
 # ── Bot factory ──────────────────────────────────────────────────────────────
 
 def make_bot(token: str) -> tuple[Bot, Dispatcher]:
     bot = Bot(token=token)
-    dp = Dispatcher(storage=MemoryStorage())
+    dp  = Dispatcher(storage=MemoryStorage())
     _register_handlers(dp)
     return bot, dp
 
 
 def _register_handlers(dp: Dispatcher):
     dp.message.register(_cmd_start, CommandStart())
-    dp.message.register(_cmd_help, Command("help"))
-    dp.message.register(_cmd_add, Command("add"))
-    dp.message.register(_cmd_list, Command("list"))
-    dp.message.register(_cmd_stop, Command("stop"))
+    dp.message.register(_cmd_help,  Command("help"))
+    dp.message.register(_cmd_add,   Command("add"))
+    dp.message.register(_cmd_list,  Command("list"))
+    dp.message.register(_cmd_stop,  Command("stop"))
 
-    # Reply keyboard buttons
-    dp.message.register(_cmd_add, F.text == BTN_ADD)
+    dp.message.register(_cmd_add,  F.text == BTN_ADD)
     dp.message.register(_cmd_list, F.text == BTN_LIST)
     dp.message.register(_cmd_stop, F.text == BTN_STOP)
     dp.message.register(_cmd_help, F.text == BTN_HELP)
 
-    # FSM
-    dp.callback_query.register(_cb_model, F.data.startswith("model:"), AddWatch.model)
+    # FSM — мультивыбор моделей
+    dp.callback_query.register(_cb_model_toggle, F.data.startswith("mt:"),   AddWatch.model)
+    dp.callback_query.register(_cb_model_done,   F.data == "model_done",     AddWatch.model)
     dp.message.register(_handle_price_min, AddWatch.price_min)
     dp.message.register(_handle_price_max, AddWatch.price_max)
-    dp.callback_query.register(_cb_condition, F.data.startswith("cond:"), AddWatch.condition)
-    dp.callback_query.register(_cb_seller, F.data.startswith("seller:"), AddWatch.seller)
-    dp.callback_query.register(_cb_city, F.data.startswith("city:"), AddWatch.city)
+    dp.callback_query.register(_cb_condition, F.data.startswith("cond:"),   AddWatch.condition)
+    dp.callback_query.register(_cb_seller,    F.data.startswith("seller:"), AddWatch.seller)
+    dp.callback_query.register(_cb_city,      F.data.startswith("city:"),   AddWatch.city)
 
-    # Delete watch
     dp.callback_query.register(_cb_delete, F.data.startswith("del:"))
 
 
@@ -77,7 +75,7 @@ def _register_handlers(dp: Dispatcher):
 def _main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_LIST)],
+            [KeyboardButton(text=BTN_ADD),  KeyboardButton(text=BTN_LIST)],
             [KeyboardButton(text=BTN_STOP), KeyboardButton(text=BTN_HELP)],
         ],
         resize_keyboard=True,
@@ -85,11 +83,18 @@ def _main_menu() -> ReplyKeyboardMarkup:
     )
 
 
-def _kb_models() -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton(text=name, callback_data=f"model:{q}")]
-        for name, q in PHONE_MODELS.items()
-    ]
+def _kb_models(selected: set[str]) -> InlineKeyboardMarkup:
+    buttons = []
+    for name, q in PHONE_MODELS.items():
+        check = "✅ " if q in selected else ""
+        buttons.append([InlineKeyboardButton(
+            text=f"{check}{name}",
+            callback_data=f"mt:{q}",
+        )])
+    buttons.append([InlineKeyboardButton(
+        text=f"➡️ Готово ({len(selected)} выбрано)" if selected else "➡️ Готово (все модели)",
+        callback_data="model_done",
+    )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -114,7 +119,7 @@ def _kb_cities() -> InlineKeyboardMarkup:
     ])
 
 
-# ── Commands ─────────────────────────────────────────────────────────────────
+# ── Commands ──────────────────────────────────────────────────────────────────
 
 async def _cmd_start(msg: Message):
     await msg.answer(
@@ -130,8 +135,8 @@ async def _cmd_help(msg: Message):
     await msg.answer(
         "<b>Как работает:</b>\n\n"
         "1. Нажми <b>➕ Добавить поиск</b>\n"
-        "2. Выбери модель, цену, состояние, продавца и город\n"
-        "3. Бот мониторит Авито каждую минуту\n"
+        "2. Выбери одну или несколько моделей, цену, состояние, продавца и город\n"
+        "3. Бот мониторит Авито каждые 30 секунд\n"
         "4. При новом объявлении — сразу пришлю карточку с фото, "
         "характеристиками, описанием и ценой\n\n"
         "До 10 поисков одновременно.",
@@ -151,16 +156,37 @@ async def _cmd_add(msg: Message, state: FSMContext):
         )
         return
     await state.set_state(AddWatch.model)
+    await state.update_data(selected_models=[])
     await msg.answer(
-        "📱 <b>Шаг 1/5 — Модель</b>\n\nВыбери что ищем:",
+        "📱 <b>Шаг 1/5 — Модели</b>\n\n"
+        "Выбери одну или несколько моделей.\n"
+        "Нажми ➡️ Готово когда закончишь.",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove(),
     )
-    await msg.answer("👇", reply_markup=_kb_models())
+    await msg.answer("👇", reply_markup=_kb_models(set()))
 
 
-async def _cb_model(cb: CallbackQuery, state: FSMContext):
-    query = cb.data.split(":", 1)[1]
+async def _cb_model_toggle(cb: CallbackQuery, state: FSMContext):
+    q = cb.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected: list = data.get("selected_models", [])
+
+    if q in selected:
+        selected.remove(q)
+    else:
+        selected.append(q)
+
+    await state.update_data(selected_models=selected)
+    await cb.message.edit_reply_markup(reply_markup=_kb_models(set(selected)))
+    await cb.answer()
+
+
+async def _cb_model_done(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected: list = data.get("selected_models", [])
+    # Собираем строку запроса: несколько моделей через OR (пробел в Авито)
+    query = " ".join(selected) if selected else ""
     await state.update_data(query=query)
     await cb.message.edit_reply_markup()
     await cb.message.answer(
@@ -233,7 +259,7 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer(
         f"✅ <b>Поиск создан!</b>\n\n"
         f"🔍 {label}\n\n"
-        f"Мониторю Авито каждую минуту. Как появится новое объявление — сразу пришлю.",
+        f"Мониторю Авито каждые 30 секунд. Как появится новое объявление — сразу пришлю.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
     )

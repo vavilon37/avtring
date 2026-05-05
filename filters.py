@@ -89,8 +89,11 @@ def build_avito_url(filters: dict) -> str:
 
 def label_from_filters(filters: dict) -> str:
     parts = []
-    if filters.get("query"):
-        parts.append(filters["query"].replace("+", " "))
+    query = filters.get("query", "")
+    if query:
+        # query содержит несколько моделей через пробел — показываем красиво
+        models = [q.replace("+", " ") for q in query.split()]
+        parts.append(", ".join(models))
     if filters.get("pmin") or filters.get("pmax"):
         pmin = filters.get("pmin", "0")
         pmax = filters.get("pmax", "∞")
