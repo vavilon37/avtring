@@ -12,17 +12,19 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import database as db
+from database import FREE_MAX_WATCHES, PAID_MAX_WATCHES, TRIAL_DAYS
 from filters import (
     PHONE_MODELS, CONDITIONS, SELLER_TYPES, CITIES,
     build_avito_url, label_from_filters,
 )
+from payments import create_invoice, check_invoice, PRICE_RUB, SUBSCRIPTION_DAYS
 
 logger = logging.getLogger(__name__)
-MAX_WATCHES_PER_USER = 10
 
 BTN_ADD  = "➕ Добавить поиск"
 BTN_LIST = "📋 Мои поиски"
 BTN_STOP = "🗑 Удалить поиск"
+BTN_SUB  = "💎 Подписка"
 BTN_HELP = "❓ Помощь"
 
 
@@ -52,10 +54,12 @@ def _register_handlers(dp: Dispatcher):
     dp.message.register(_cmd_add,   Command("add"))
     dp.message.register(_cmd_list,  Command("list"))
     dp.message.register(_cmd_stop,  Command("stop"))
+    dp.message.register(_cmd_sub,   Command("sub"))
 
     dp.message.register(_cmd_add,  F.text == BTN_ADD)
     dp.message.register(_cmd_list, F.text == BTN_LIST)
     dp.message.register(_cmd_stop, F.text == BTN_STOP)
+    dp.message.register(_cmd_sub,  F.text == BTN_SUB)
     dp.message.register(_cmd_help, F.text == BTN_HELP)
 
     # FSM — мультивыбор моделей
@@ -67,7 +71,8 @@ def _register_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_seller,    F.data.startswith("seller:"), AddWatch.seller)
     dp.callback_query.register(_cb_city,      F.data.startswith("city:"),   AddWatch.city)
 
-    dp.callback_query.register(_cb_delete, F.data.startswith("del:"))
+    dp.callback_query.register(_cb_delete,      F.data.startswith("del:"))
+    dp.callback_query.register(_cb_check_payment, F.data.startswith("chkpay:"))
 
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
@@ -76,7 +81,8 @@ def _main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_ADD),  KeyboardButton(text=BTN_LIST)],
-            [KeyboardButton(text=BTN_STOP), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_STOP), KeyboardButton(text=BTN_SUB)],
+            [KeyboardButton(text=BTN_HELP)],
         ],
         resize_keyboard=True,
         persistent=True,
@@ -119,14 +125,42 @@ def _kb_cities() -> InlineKeyboardMarkup:
     ])
 
 
+def _kb_pay(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Оплатить {PRICE_RUB}₽", url=pay_url)],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"chkpay:{invoice_id}")],
+    ])
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _plan_text(user_id: int) -> str:
+    plan = await db.get_user_plan(user_id)
+    if plan == "paid":
+        user = await db.get_user(user_id)
+        expires = user["sub_expires_at"][:10] if user["sub_expires_at"] else "—"
+        return f"💎 <b>Платная подписка</b> до {expires}"
+    elif plan == "trial":
+        return f"🎁 <b>Пробный период</b> ({TRIAL_DAYS} дня бесплатно)"
+    else:
+        return "🔒 <b>Бесплатный план</b>"
+
+
+async def _max_watches(user_id: int) -> int:
+    plan = await db.get_user_plan(user_id)
+    return PAID_MAX_WATCHES if plan == "paid" else FREE_MAX_WATCHES
+
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 async def _cmd_start(msg: Message):
+    await db.ensure_user(msg.from_user.id)
+    plan = await db.get_user_plan(msg.from_user.id)
+    trial_note = f"\n\n🎁 У тебя активен пробный период <b>{TRIAL_DAYS} дня</b> — скорость как у платного!" if plan == "trial" else ""
     await msg.answer(
         "📱 <b>Avito Ringer</b>\n\n"
         "Слежу за новыми объявлениями о продаже телефонов на Авито "
-        "и сразу присылаю карточку с фото и всеми характеристиками.\n\n"
-        "До 10 поисков одновременно. Проверка каждые 15 секунд.",
+        f"и сразу присылаю карточку с фото и всеми характеристиками.{trial_note}",
         parse_mode="HTML",
         reply_markup=_main_menu(),
     )
@@ -137,26 +171,95 @@ async def _cmd_help(msg: Message):
         "<b>Как работает:</b>\n\n"
         "1. Нажми <b>➕ Добавить поиск</b>\n"
         "2. Выбери модели, цену, состояние, продавца и город\n"
-        "3. Бот мониторит Авито каждые 15 секунд\n"
+        "3. Бот мониторит Авито и присылает новые объявления\n"
         "4. При новом объявлении — сразу пришлю карточку с фото, "
         "характеристиками, описанием и ценой\n\n"
-        "До 10 поисков одновременно.\n"
+        "<b>Планы:</b>\n"
+        f"🎁 Пробный период: {TRIAL_DAYS} дня — как платный\n"
+        f"🔒 Бесплатный: 1 поиск, проверка раз в 5 минут\n"
+        f"💎 Платный ({PRICE_RUB}₽/нед): 5 поисков, проверка каждые 15 сек\n\n"
         "Удалить поиск — <b>🗑 Удалить поиск</b>.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
     )
 
 
+async def _cmd_sub(msg: Message):
+    await db.ensure_user(msg.from_user.id)
+    plan_str = await _plan_text(msg.from_user.id)
+
+    if await db.is_subscribed(msg.from_user.id):
+        await msg.answer(
+            f"{plan_str}\n\n"
+            "Хочешь продлить подписку ещё на 7 дней?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"💳 Продлить за {PRICE_RUB}₽", callback_data="new_invoice")]
+            ]),
+        )
+        return
+
+    invoice = await create_invoice(msg.from_user.id)
+    if not invoice:
+        await msg.answer("❌ Ошибка при создании счёта. Попробуй позже.")
+        return
+
+    await db.save_invoice(invoice["invoice_id"], msg.from_user.id)
+    await msg.answer(
+        f"{plan_str}\n\n"
+        f"💎 <b>Подписка Avito Ringer</b>\n\n"
+        f"• Проверка каждые <b>15 секунд</b>\n"
+        f"• До <b>5 поисков</b> одновременно\n"
+        f"• Срок: <b>{SUBSCRIPTION_DAYS} дней</b>\n"
+        f"• Цена: <b>{PRICE_RUB}₽</b>\n\n"
+        f"Оплата через @CryptoBot — безопасно и мгновенно.",
+        parse_mode="HTML",
+        reply_markup=_kb_pay(invoice["pay_url"], invoice["invoice_id"]),
+    )
+
+
+async def _cb_check_payment(cb: CallbackQuery):
+    invoice_id = cb.data.split(":", 1)[1]
+    await cb.answer("Проверяю оплату...", show_alert=False)
+
+    paid = await check_invoice(invoice_id)
+    if paid:
+        user_id = cb.from_user.id
+        expires = await db.activate_subscription(user_id)
+        expires_str = expires.strftime("%d.%m.%Y")
+        await cb.message.edit_text(
+            f"✅ <b>Подписка активирована!</b>\n\n"
+            f"Действует до <b>{expires_str}</b>\n"
+            f"Проверка каждые 15 секунд, до 5 поисков.",
+            parse_mode="HTML",
+        )
+    else:
+        await cb.answer("❌ Оплата не найдена. Попробуй через минуту.", show_alert=True)
+
+
 # ── Add watch FSM ─────────────────────────────────────────────────────────────
 
 async def _cmd_add(msg: Message, state: FSMContext):
+    await db.ensure_user(msg.from_user.id)
     watches = await db.get_user_watches(msg.from_user.id)
-    if len(watches) >= MAX_WATCHES_PER_USER:
-        await msg.answer(
-            f"❌ Максимум {MAX_WATCHES_PER_USER} поисков. Удали старый.",
-            reply_markup=_main_menu(),
-        )
+    max_w = await _max_watches(msg.from_user.id)
+
+    if len(watches) >= max_w:
+        plan = await db.get_user_plan(msg.from_user.id)
+        if plan == "free":
+            await msg.answer(
+                f"❌ На бесплатном плане доступен <b>{FREE_MAX_WATCHES} поиск</b>.\n\n"
+                f"Оформи подписку 💎 за {PRICE_RUB}₽/нед — получишь до 5 поисков и скорость 15 сек.",
+                parse_mode="HTML",
+                reply_markup=_main_menu(),
+            )
+        else:
+            await msg.answer(
+                f"❌ Максимум {max_w} поисков. Удали старый.",
+                reply_markup=_main_menu(),
+            )
         return
+
     await state.set_state(AddWatch.model)
     await state.update_data(selected_models=[])
     await msg.answer(
@@ -187,7 +290,6 @@ async def _cb_model_toggle(cb: CallbackQuery, state: FSMContext):
 async def _cb_model_done(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     selected: list = data.get("selected_models", [])
-    # Собираем строку запроса: несколько моделей через OR (пробел в Авито)
     query = " ".join(selected) if selected else ""
     await state.update_data(query=query)
     await cb.message.edit_reply_markup()
@@ -257,11 +359,14 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
     label = label_from_filters(data)
     await db.add_watch(cb.from_user.id, url, label)
 
+    plan = await db.get_user_plan(cb.from_user.id)
+    interval_note = "каждые 15 секунд" if plan in ("paid", "trial") else "раз в 5 минут"
+
     await cb.message.edit_reply_markup()
     await cb.message.answer(
         f"✅ <b>Поиск создан!</b>\n\n"
         f"🔍 {label}\n\n"
-        f"Мониторю Авито каждые 15 секунд. Как появится новое объявление — сразу пришлю.",
+        f"Мониторю Авито {interval_note}. Как появится новое объявление — сразу пришлю.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
     )
@@ -271,13 +376,15 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
 
 async def _cmd_list(msg: Message):
     watches = await db.get_user_watches(msg.from_user.id)
+    plan_str = await _plan_text(msg.from_user.id)
     if not watches:
         await msg.answer(
-            "У тебя пока нет поисков. Нажми ➕ Добавить поиск.",
+            f"{plan_str}\n\nУ тебя пока нет поисков. Нажми ➕ Добавить поиск.",
+            parse_mode="HTML",
             reply_markup=_main_menu(),
         )
         return
-    text = "📋 <b>Твои поиски:</b>\n\n"
+    text = f"{plan_str}\n\n📋 <b>Твои поиски:</b>\n\n"
     for w in watches:
         name = w["label"] or f"Поиск #{w['id']}"
         text += f"<b>#{w['id']}</b> {name}\n"

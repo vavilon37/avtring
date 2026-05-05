@@ -1,8 +1,15 @@
 import aiosqlite
 import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 DB_PATH = "avito_ringer.db"
+
+FREE_MAX_WATCHES = 1
+PAID_MAX_WATCHES = 5
+TRIAL_DAYS = 3
+FREE_INTERVAL = 300   # 5 минут
+PAID_INTERVAL = 15    # 15 секунд
 
 
 async def init_db():
@@ -24,8 +31,115 @@ async def init_db():
                 PRIMARY KEY (watch_id, listing_id)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                trial_started_at TIMESTAMP,
+                sub_expires_at TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                invoice_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         await db.commit()
     logger.info("Database initialized")
+
+
+async def ensure_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, trial_started_at) VALUES (?, ?)",
+            (user_id, datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+
+
+async def get_user(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def is_subscribed(user_id: int) -> bool:
+    user = await get_user(user_id)
+    if not user:
+        return False
+    if user["sub_expires_at"]:
+        expires = datetime.fromisoformat(user["sub_expires_at"])
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        return expires > datetime.now(timezone.utc)
+    return False
+
+
+async def is_trial_active(user_id: int) -> bool:
+    user = await get_user(user_id)
+    if not user or not user["trial_started_at"]:
+        return False
+    started = datetime.fromisoformat(user["trial_started_at"])
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - started
+    return delta.days < TRIAL_DAYS
+
+
+async def get_user_plan(user_id: int) -> str:
+    """Returns 'paid', 'trial', or 'free'"""
+    if await is_subscribed(user_id):
+        return "paid"
+    if await is_trial_active(user_id):
+        return "trial"
+    return "free"
+
+
+async def activate_subscription(user_id: int, days: int = 7):
+    now = datetime.now(timezone.utc)
+    user = await get_user(user_id)
+    if user and user["sub_expires_at"]:
+        current = datetime.fromisoformat(user["sub_expires_at"])
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        if current > now:
+            from datetime import timedelta
+            expires = current + timedelta(days=days)
+        else:
+            from datetime import timedelta
+            expires = now + timedelta(days=days)
+    else:
+        from datetime import timedelta
+        expires = now + timedelta(days=days)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET sub_expires_at = ? WHERE user_id = ?",
+            (expires.isoformat(), user_id),
+        )
+        await db.commit()
+    return expires
+
+
+async def save_invoice(invoice_id: str, user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO invoices (invoice_id, user_id) VALUES (?, ?)",
+            (invoice_id, user_id),
+        )
+        await db.commit()
+
+
+async def get_invoice_user(invoice_id: str) -> int | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT user_id FROM invoices WHERE invoice_id = ?", (invoice_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
 
 
 async def add_watch(user_id: int, url: str, label: str = "") -> int:

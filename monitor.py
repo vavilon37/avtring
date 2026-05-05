@@ -4,6 +4,7 @@ import random
 from aiogram import Bot
 
 import database as db
+from database import FREE_INTERVAL, PAID_INTERVAL
 from parser import AvitoParser
 from bot import send_listing
 
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class Monitor:
-    def __init__(self, bot: Bot, interval: int = 15):
+    def __init__(self, bot: Bot, interval: int = PAID_INTERVAL):
         self.bot = bot
         self.interval = interval
         self._parser = AvitoParser()
@@ -22,7 +23,7 @@ class Monitor:
         await self._parser.start()
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        logger.info(f"Monitor started, interval={self.interval}s")
+        logger.info(f"Monitor started")
 
     async def stop(self):
         self._running = False
@@ -40,20 +41,49 @@ class Monitor:
         while self._running:
             await self._tick()
             jitter = random.uniform(-3, 3)
-            await asyncio.sleep(max(5, self.interval + jitter))
+            await asyncio.sleep(max(5, PAID_INTERVAL + jitter))
 
     async def _tick(self):
         watches = await db.get_all_watches()
         if not watches:
             return
-        logger.info(f"Checking {len(watches)} watches")
-        sem = asyncio.Semaphore(3)
 
-        async def check_one(watch: dict):
-            async with sem:
-                await self._check_watch(watch)
+        now = asyncio.get_event_loop().time()
 
-        await asyncio.gather(*[check_one(w) for w in watches], return_exceptions=True)
+        paid_watches = []
+        free_watches = []
+
+        for watch in watches:
+            plan = await db.get_user_plan(watch["user_id"])
+            if plan in ("paid", "trial"):
+                paid_watches.append(watch)
+            else:
+                free_watches.append(watch)
+
+        # Paid: check every tick (~15s)
+        if paid_watches:
+            logger.info(f"Checking {len(paid_watches)} paid watches")
+            sem = asyncio.Semaphore(3)
+
+            async def check_paid(watch):
+                async with sem:
+                    await self._check_watch(watch)
+
+            await asyncio.gather(*[check_paid(w) for w in paid_watches], return_exceptions=True)
+
+        # Free: check only if enough time passed (~5 min)
+        if free_watches:
+            last = getattr(self, "_last_free_check", 0)
+            if now - last >= FREE_INTERVAL:
+                self._last_free_check = now
+                logger.info(f"Checking {len(free_watches)} free watches")
+                sem = asyncio.Semaphore(2)
+
+                async def check_free(watch):
+                    async with sem:
+                        await self._check_watch(watch)
+
+                await asyncio.gather(*[check_free(w) for w in free_watches], return_exceptions=True)
 
     async def _check_watch(self, watch: dict):
         watch_id = watch["id"]
@@ -72,7 +102,6 @@ class Monitor:
             logger.info(f"Watch {watch_id}: {len(new_listings)} new listings for user {user_id}")
 
             for listing in new_listings:
-                # Fetch full details for each new listing
                 detailed = await self._parser.fetch_listing_detail(listing)
                 await send_listing(self.bot, user_id, detailed, label)
                 await asyncio.sleep(0.5)
