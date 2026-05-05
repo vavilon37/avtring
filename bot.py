@@ -148,29 +148,72 @@ async def _cb_delete(cb: CallbackQuery):
         await cb.answer("Не найдено или нет прав.", show_alert=True)
 
 
-async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str):
+def _build_listing_text(listing: dict, watch_label: str) -> str:
     label = watch_label or "Новое объявление"
-    text = (
-        f"🔔 <b>{label}</b>\n\n"
-        f"<b>{listing['title']}</b>\n"
-        f"💰 {listing['price']}\n"
-        f"📍 {listing['location']}\n"
-        f"🕐 {listing['date']}\n\n"
-        f"<a href='{listing['link']}'>Открыть объявление</a>"
-    )
+    lines = [f"🔔 <b>{label}</b>\n"]
+    lines.append(f"<b>{listing['title']}</b>")
+    lines.append(f"💰 <b>{listing['price']}</b>")
+
+    # Характеристики
+    params: dict = listing.get("params", {})
+    if params:
+        lines.append("")
+        for k, v in list(params.items())[:8]:
+            lines.append(f"▪️ {k}: {v}")
+
+    # Описание
+    desc = listing.get("description", "").strip()
+    if desc:
+        short = desc[:300] + ("..." if len(desc) > 300 else "")
+        lines.append(f"\n📝 {short}")
+
+    lines.append("")
+    if listing.get("location"):
+        lines.append(f"📍 {listing['location']}")
+    if listing.get("date"):
+        lines.append(f"🕐 {listing['date']}")
+
+    # Продавец
+    seller_parts = []
+    if listing.get("seller_name"):
+        seller_parts.append(listing["seller_name"])
+    if listing.get("seller_type"):
+        seller_parts.append(listing["seller_type"])
+    if seller_parts:
+        lines.append(f"👤 {' · '.join(seller_parts)}")
+
+    lines.append(f"\n<a href='{listing['link']}'>🔗 Открыть объявление</a>")
+    return "\n".join(lines)
+
+
+async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str):
+    from aiogram.types import InputMediaPhoto
+
+    text = _build_listing_text(listing, watch_label)
+    images: list = listing.get("images", [])
+    # Filter out empty/broken image urls
+    images = [img for img in images if img and img.startswith("http")]
+
     try:
-        if listing.get("image_url"):
+        if len(images) >= 2:
+            # Send as album (max 10 photos), caption on first
+            media = [InputMediaPhoto(media=images[0], caption=text, parse_mode="HTML")]
+            for img in images[1:10]:
+                media.append(InputMediaPhoto(media=img))
+            await bot.send_media_group(chat_id=user_id, media=media)
+
+        elif len(images) == 1:
             await bot.send_photo(
                 chat_id=user_id,
-                photo=listing["image_url"],
+                photo=images[0],
                 caption=text,
                 parse_mode="HTML",
             )
         else:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+
     except Exception as e:
         logger.warning(f"Failed to send listing to {user_id}: {e}")
-        # Fallback without photo
         try:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
         except Exception as e2:

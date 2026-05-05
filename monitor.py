@@ -35,7 +35,6 @@ class Monitor:
         logger.info("Monitor stopped")
 
     async def _loop(self):
-        # Stagger first run: wait a few seconds after startup
         await asyncio.sleep(3)
         while self._running:
             await self._tick()
@@ -45,10 +44,7 @@ class Monitor:
         watches = await db.get_all_watches()
         if not watches:
             return
-
         logger.info(f"Checking {len(watches)} watches")
-
-        # Process concurrently but with a semaphore to avoid hammering Avito
         sem = asyncio.Semaphore(3)
 
         async def check_one(watch: dict):
@@ -67,14 +63,17 @@ class Monitor:
             listings = await self._parser.fetch_listings(url)
             new_listings = await db.filter_new_listings(watch_id, listings)
 
-            if new_listings:
-                logger.info(f"Watch {watch_id}: {len(new_listings)} new listings for user {user_id}")
-                for listing in new_listings:
-                    await send_listing(self.bot, user_id, listing, label)
-                    # Small delay between messages to avoid Telegram flood limits
-                    await asyncio.sleep(0.3)
-            else:
+            if not new_listings:
                 logger.debug(f"Watch {watch_id}: no new listings")
+                return
+
+            logger.info(f"Watch {watch_id}: {len(new_listings)} new listings for user {user_id}")
+
+            for listing in new_listings:
+                # Fetch full details for each new listing
+                detailed = await self._parser.fetch_listing_detail(listing)
+                await send_listing(self.bot, user_id, detailed, label)
+                await asyncio.sleep(0.5)
 
         except Exception as e:
             logger.error(f"Watch {watch_id} error: {e}")
