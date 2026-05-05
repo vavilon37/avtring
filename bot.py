@@ -123,9 +123,10 @@ def _kb_cities() -> InlineKeyboardMarkup:
 
 async def _cmd_start(msg: Message):
     await msg.answer(
-        "📱 <b>iPhone &amp; Phone Ringer</b>\n\n"
+        "📱 <b>Avito Ringer</b>\n\n"
         "Слежу за новыми объявлениями о продаже телефонов на Авито "
-        "и сразу присылаю карточку с фото и всеми характеристиками.",
+        "и сразу присылаю карточку с фото и всеми характеристиками.\n\n"
+        "До 10 поисков одновременно. Проверка каждые 15 секунд.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
     )
@@ -135,11 +136,12 @@ async def _cmd_help(msg: Message):
     await msg.answer(
         "<b>Как работает:</b>\n\n"
         "1. Нажми <b>➕ Добавить поиск</b>\n"
-        "2. Выбери одну или несколько моделей, цену, состояние, продавца и город\n"
-        "3. Бот мониторит Авито каждые 30 секунд\n"
+        "2. Выбери модели, цену, состояние, продавца и город\n"
+        "3. Бот мониторит Авито каждые 15 секунд\n"
         "4. При новом объявлении — сразу пришлю карточку с фото, "
         "характеристиками, описанием и ценой\n\n"
-        "До 10 поисков одновременно.",
+        "До 10 поисков одновременно.\n"
+        "Удалить поиск — <b>🗑 Удалить поиск</b>.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
     )
@@ -158,7 +160,7 @@ async def _cmd_add(msg: Message, state: FSMContext):
     await state.set_state(AddWatch.model)
     await state.update_data(selected_models=[])
     await msg.answer(
-        "📱 <b>Шаг 1/5 — Модели</b>\n\n"
+        "📱 <b>Шаг 1/6 — Модели</b>\n\n"
         "Выбери одну или несколько моделей.\n"
         "Нажми ➡️ Готово когда закончишь.",
         parse_mode="HTML",
@@ -190,7 +192,7 @@ async def _cb_model_done(cb: CallbackQuery, state: FSMContext):
     await state.update_data(query=query)
     await cb.message.edit_reply_markup()
     await cb.message.answer(
-        "💰 <b>Шаг 2/5 — Минимальная цена (₽)</b>\n\n"
+        "💰 <b>Шаг 2/6 — Минимальная цена (₽)</b>\n\n"
         "Введи число или <b>0</b> чтобы пропустить:",
         parse_mode="HTML",
     )
@@ -202,7 +204,7 @@ async def _handle_price_min(msg: Message, state: FSMContext):
     pmin = val if val.isdigit() and int(val) > 0 else ""
     await state.update_data(pmin=pmin)
     await msg.answer(
-        "💰 <b>Шаг 3/5 — Максимальная цена (₽)</b>\n\n"
+        "💰 <b>Шаг 3/6 — Максимальная цена (₽)</b>\n\n"
         "Введи число или <b>0</b> чтобы пропустить:",
         parse_mode="HTML",
     )
@@ -214,7 +216,7 @@ async def _handle_price_max(msg: Message, state: FSMContext):
     pmax = val if val.isdigit() and int(val) > 0 else ""
     await state.update_data(pmax=pmax)
     await msg.answer(
-        "📦 <b>Шаг 4/5 — Состояние</b>",
+        "📦 <b>Шаг 4/6 — Состояние</b>",
         parse_mode="HTML",
         reply_markup=_kb_conditions(),
     )
@@ -226,7 +228,7 @@ async def _cb_condition(cb: CallbackQuery, state: FSMContext):
     await state.update_data(condition=val)
     await cb.message.edit_reply_markup()
     await cb.message.answer(
-        "👤 <b>Шаг 5a/5 — Тип продавца</b>",
+        "👤 <b>Шаг 5/6 — Тип продавца</b>",
         parse_mode="HTML",
         reply_markup=_kb_sellers(),
     )
@@ -238,7 +240,7 @@ async def _cb_seller(cb: CallbackQuery, state: FSMContext):
     await state.update_data(seller_type=val)
     await cb.message.edit_reply_markup()
     await cb.message.answer(
-        "🏙 <b>Шаг 5b/5 — Город</b>",
+        "🏙 <b>Шаг 6/6 — Город</b>",
         parse_mode="HTML",
         reply_markup=_kb_cities(),
     )
@@ -259,7 +261,7 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer(
         f"✅ <b>Поиск создан!</b>\n\n"
         f"🔍 {label}\n\n"
-        f"Мониторю Авито каждые 30 секунд. Как появится новое объявление — сразу пришлю.",
+        f"Мониторю Авито каждые 15 секунд. Как появится новое объявление — сразу пришлю.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
     )
