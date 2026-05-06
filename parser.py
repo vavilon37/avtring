@@ -121,10 +121,11 @@ BLOCK_COOLDOWN = 600   # 10 min pause after captcha detected
 
 
 class AvitoParser:
-    def __init__(self):
+    def __init__(self, on_blocked=None):
         self._pw = None
         self._context: BrowserContext | None = None
         self._blocked_until: float = 0
+        self._on_blocked = on_blocked  # async callback()
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -217,9 +218,14 @@ class AvitoParser:
                 self._blocked_until = time.time() + BLOCK_COOLDOWN
                 logger.warning(
                     f"Avito block/captcha detected (html_len={len(early_html)}) — "
-                    f"pausing {BLOCK_COOLDOWN//60} min. To fix: open Chrome with the profile, visit avito.ru, solve captcha."
+                    f"pausing {BLOCK_COOLDOWN//60} min."
                 )
                 Path("last_failed_page.html").write_text(early_html, encoding="utf-8")
+                if self._on_blocked:
+                    try:
+                        await self._on_blocked()
+                    except Exception:
+                        pass
                 return ""
 
             if wait_selector:

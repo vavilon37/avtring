@@ -5,7 +5,7 @@ from aiogram import Bot
 
 import database as db
 from database import FREE_INTERVAL, PAID_INTERVAL
-from parser import AvitoParser
+from parser import AvitoParser, BLOCK_COOLDOWN
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime
 
@@ -15,13 +15,33 @@ DETAIL_CONCURRENCY = 2  # simultaneous browser tabs for detail pages
 logger = logging.getLogger(__name__)
 
 
+OWNER_ID = 8501271486  # @yodealer
+
+
 class Monitor:
     def __init__(self, bot: Bot):
         self.bot = bot
-        self._parser = AvitoParser()
+        self._parser = AvitoParser(on_blocked=self._notify_blocked)
         self._parser_started = False
         self._running = False
         self._task: asyncio.Task | None = None
+
+    async def _notify_blocked(self):
+        try:
+            await self.bot.send_message(
+                chat_id=OWNER_ID,
+                text=(
+                    "⚠️ <b>Авито заблокировал парсер</b>\n\n"
+                    "Обнаружена капча или IP-блокировка.\n"
+                    f"Пауза {BLOCK_COOLDOWN // 60} минут, потом попробую снова.\n\n"
+                    "Если не восстановится — прогрей профиль вручную:\n"
+                    "<code>chrome.exe --user-data-dir=\"chrome_profile\"</code>\n"
+                    "→ зайди на avito.ru → реши капчу → закрой Chrome → перезапусти бота."
+                ),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send block notification: {e}")
 
     async def start(self):
         self._running = True
