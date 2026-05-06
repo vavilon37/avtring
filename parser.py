@@ -312,6 +312,11 @@ class AvitoParser:
         soup = BeautifulSoup(html, "lxml")
         result = base.copy()
 
+        # Save first detail page for debug
+        import os
+        if not os.path.exists("last_detail_page.html"):
+            Path("last_detail_page.html").write_text(html, encoding="utf-8")
+
         images = []
         gallery = soup.find("div", attrs={"data-marker": "image-frame/image-wrapper"})
         if not gallery:
@@ -341,6 +346,7 @@ class AvitoParser:
             result["seller_type"] = seller_type_el.get_text(strip=True)
 
         params = {}
+        # Try old marker first, then new Avito structure
         params_section = soup.find(attrs={"data-marker": "item-view/item-params"})
         if params_section:
             for li in params_section.find_all("li"):
@@ -350,6 +356,27 @@ class AvitoParser:
                     val = spans[1].get_text(strip=True)
                     if key and val:
                         params[key] = val
+        if not params:
+            # New Avito layout: params are in dl/dt+dd pairs
+            for dl in soup.find_all("dl"):
+                dts = dl.find_all("dt")
+                dds = dl.find_all("dd")
+                for dt, dd in zip(dts, dds):
+                    key = dt.get_text(strip=True).rstrip(":")
+                    val = dd.get_text(strip=True)
+                    if key and val:
+                        params[key] = val
+        if not params:
+            # Another new layout: params-wrapper with key/value spans
+            for section in soup.find_all(class_=lambda c: c and "params" in c.lower()):
+                rows = section.find_all(class_=lambda c: c and "param" in c.lower())
+                for row in rows:
+                    spans = row.find_all("span")
+                    if len(spans) >= 2:
+                        key = spans[0].get_text(strip=True).rstrip(":")
+                        val = spans[-1].get_text(strip=True)
+                        if key and val and key != val:
+                            params[key] = val
         result["params"] = params
 
         loc_el = soup.find(attrs={"data-marker": "item-view/item-address"})

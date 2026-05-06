@@ -89,12 +89,14 @@ async def is_trial_active(user_id: int) -> bool:
     return delta.days < TRIAL_DAYS
 
 
+OWNER_IDS = {8501271486}  # @yodealer — always paid
+
 async def get_user_plan(user_id: int) -> str:
     """Returns 'paid', 'trial', or 'free'"""
+    if user_id in OWNER_IDS:
+        return "paid"
     if await is_subscribed(user_id):
         return "paid"
-    if await is_trial_active(user_id):
-        return "trial"
     return "free"
 
 

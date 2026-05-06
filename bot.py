@@ -13,7 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import database as db
-from database import FREE_MAX_WATCHES, PAID_MAX_WATCHES, TRIAL_DAYS
+from database import FREE_MAX_WATCHES, PAID_MAX_WATCHES
 from filters import (
     PHONE_MODELS, CONDITIONS, SELLER_TYPES, CITIES,
     build_avito_url, label_from_filters,
@@ -21,6 +21,8 @@ from filters import (
 from payments import create_invoice, check_invoice, PRICE_RUB, SUBSCRIPTION_DAYS
 
 logger = logging.getLogger(__name__)
+
+OWNER_IDS = {8501271486}  # @yodealer — бесплатный доступ всегда
 
 BTN_ADD  = "➕ Добавить поиск"
 BTN_LIST = "📋 Мои поиски"
@@ -41,6 +43,7 @@ class AddWatch(StatesGroup):
 
 
 # ── Bot factory ──────────────────────────────────────────────────────────────
+
 
 def make_bot(token: str, session=None) -> tuple[Bot, Dispatcher]:
     bot = Bot(token=token, session=session)
@@ -139,12 +142,10 @@ async def _plan_text(user_id: int) -> str:
     plan = await db.get_user_plan(user_id)
     if plan == "paid":
         user = await db.get_user(user_id)
-        expires = user["sub_expires_at"][:10] if user["sub_expires_at"] else "—"
-        return f"💎 <b>Платная подписка</b> до {expires}"
-    elif plan == "trial":
-        return f"🎁 <b>Пробный период</b> ({TRIAL_DAYS} дня бесплатно)"
+        expires = user["sub_expires_at"][:10] if user["sub_expires_at"] else "∞"
+        return f"💎 <b>Подписка активна</b> до {expires}"
     else:
-        return "🔒 <b>Бесплатный план</b>"
+        return "🔒 <b>Нет подписки</b>"
 
 
 async def _max_watches(user_id: int) -> int:
@@ -156,12 +157,10 @@ async def _max_watches(user_id: int) -> int:
 
 async def _cmd_start(msg: Message):
     await db.ensure_user(msg.from_user.id)
-    plan = await db.get_user_plan(msg.from_user.id)
-    trial_note = f"\n\n🎁 У тебя активен пробный период <b>{TRIAL_DAYS} дня</b> — скорость как у платного!" if plan == "trial" else ""
     await msg.answer(
         "📱 <b>Avito Ringer</b>\n\n"
         "Слежу за новыми объявлениями о продаже телефонов на Авито "
-        f"и сразу присылаю карточку с фото и всеми характеристиками.{trial_note}",
+        "и сразу присылаю карточку с фото и всеми характеристиками.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
     )
@@ -175,10 +174,8 @@ async def _cmd_help(msg: Message):
         "3. Бот мониторит Авито и присылает новые объявления\n"
         "4. При новом объявлении — сразу пришлю карточку с фото, "
         "характеристиками, описанием и ценой\n\n"
-        "<b>Планы:</b>\n"
-        f"🎁 Пробный период: {TRIAL_DAYS} дня — как платный\n"
-        f"🔒 Бесплатный: 1 поиск, проверка раз в 5 минут\n"
-        f"💎 Платный ({PRICE_RUB}₽/нед): 5 поисков, проверка каждые 15 сек\n\n"
+        "<b>Подписка:</b>\n"
+        f"💎 {PRICE_RUB}₽/нед — 5 поисков, проверка каждые 15 сек\n\n"
         "Удалить поиск — <b>🗑 Удалить поиск</b>.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
@@ -242,23 +239,25 @@ async def _cb_check_payment(cb: CallbackQuery):
 
 async def _cmd_add(msg: Message, state: FSMContext):
     await db.ensure_user(msg.from_user.id)
+    plan = await db.get_user_plan(msg.from_user.id)
+
+    if plan == "free":
+        await msg.answer(
+            f"🔒 <b>Доступно только по подписке</b>\n\n"
+            f"Оформи подписку 💎 за {PRICE_RUB}₽/нед — получишь до 5 поисков и проверку каждые 15 сек.",
+            parse_mode="HTML",
+            reply_markup=_main_menu(),
+        )
+        return
+
     watches = await db.get_user_watches(msg.from_user.id)
     max_w = await _max_watches(msg.from_user.id)
 
     if len(watches) >= max_w:
-        plan = await db.get_user_plan(msg.from_user.id)
-        if plan == "free":
-            await msg.answer(
-                f"❌ На бесплатном плане доступен <b>{FREE_MAX_WATCHES} поиск</b>.\n\n"
-                f"Оформи подписку 💎 за {PRICE_RUB}₽/нед — получишь до 5 поисков и скорость 15 сек.",
-                parse_mode="HTML",
-                reply_markup=_main_menu(),
-            )
-        else:
-            await msg.answer(
-                f"❌ Максимум {max_w} поисков. Удали старый.",
-                reply_markup=_main_menu(),
-            )
+        await msg.answer(
+            f"❌ Максимум {max_w} поисков. Удали старый.",
+            reply_markup=_main_menu(),
+        )
         return
 
     await state.set_state(AddWatch.model)
