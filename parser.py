@@ -227,8 +227,12 @@ class AvitoParser:
         url = listing["link"]
         if not url:
             return listing
+        # Strip query params — detail page doesn't need them
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(url)
+        clean_url = urlunparse(parsed._replace(query="", fragment=""))
         await asyncio.sleep(random.uniform(1.5, 3.0))
-        html = await self._get_html(url, referer="https://www.avito.ru/")
+        html = await self._get_html(clean_url, referer="https://www.avito.ru/")
         if not html:
             return listing
         return self._parse_detail_html(html, listing)

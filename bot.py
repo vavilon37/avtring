@@ -1,4 +1,5 @@
 import logging
+import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -451,18 +452,31 @@ def _build_listing_text(listing: dict, watch_label: str) -> str:
     return "\n".join(lines)
 
 
+async def _download_image(url: str) -> bytes | None:
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            r = await client.get(url, headers={"Referer": "https://www.avito.ru/"})
+            if r.status_code == 200:
+                return r.content
+    except Exception:
+        pass
+    return None
+
+
 async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str):
     text = _build_listing_text(listing, watch_label)
     images = [img for img in listing.get("images", []) if img and img.startswith("http")]
 
     try:
-        if len(images) >= 2:
-            media = [InputMediaPhoto(media=images[0], caption=text, parse_mode="HTML")]
-            for img in images[1:10]:
-                media.append(InputMediaPhoto(media=img))
-            await bot.send_media_group(chat_id=user_id, media=media)
-        elif len(images) == 1:
-            await bot.send_photo(chat_id=user_id, photo=images[0], caption=text, parse_mode="HTML")
+        if images:
+            # Download first image and send as file (Telegram can't fetch Avito images directly)
+            photo_bytes = await _download_image(images[0])
+            if photo_bytes:
+                from aiogram.types import BufferedInputFile
+                photo_file = BufferedInputFile(photo_bytes, filename="photo.jpg")
+                await bot.send_photo(chat_id=user_id, photo=photo_file, caption=text, parse_mode="HTML")
+            else:
+                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
         else:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
     except Exception as e:
