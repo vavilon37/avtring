@@ -333,10 +333,7 @@ class AvitoParser:
         soup = BeautifulSoup(html, "lxml")
         result = base.copy()
 
-        # Save first detail page for debug
-        import os
-        if not os.path.exists("last_detail_page.html"):
-            Path("last_detail_page.html").write_text(html, encoding="utf-8")
+        Path("last_detail_page.html").write_text(html, encoding="utf-8")
 
         images = []
         gallery = soup.find("div", attrs={"data-marker": "image-frame/image-wrapper"})
