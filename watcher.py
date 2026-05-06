@@ -33,7 +33,12 @@ def git_pull() -> bool:
 
 def start_bot() -> subprocess.Popen:
     logger.info("Starting main.py ...")
-    return subprocess.Popen([sys.executable, "main.py"], cwd=CWD)
+    return subprocess.Popen(
+        [sys.executable, "-u", "main.py"],
+        cwd=CWD,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
 
 
 def stop_bot(proc: subprocess.Popen):
