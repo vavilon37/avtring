@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+chrome_profile/
+last_failed_page.html
+debug.html
+debug.png
+bot_output.log
