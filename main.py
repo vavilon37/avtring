@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import aiohttp
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from bot import make_bot
 from database import init_db
 from monitor import Monitor
@@ -31,8 +32,7 @@ async def main():
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-    session = AiohttpSession(connector=connector)
+    session = AiohttpSession(connector=aiohttp.TCPConnector(ssl=False))
     bot, dp = make_bot(token, session=session)
     monitor = Monitor(bot=bot)
 
