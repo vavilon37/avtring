@@ -1,8 +1,10 @@
 import asyncio
 import logging
 import os
+import ssl
 from dotenv import load_dotenv
 
+import aiohttp
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 from bot import make_bot
@@ -26,7 +28,11 @@ async def main():
 
     await init_db()
 
-    session = AiohttpSession()
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    session = AiohttpSession(connector=connector)
     bot, dp = make_bot(token, session=session)
     monitor = Monitor(bot=bot)
 
