@@ -26,8 +26,7 @@ async def main():
 
     await init_db()
 
-    # Telegram через HTTP прокси Happ (10809 стабильнее SOCKS5 для TLS на Windows)
-    session = AiohttpSession(proxy="http://127.0.0.1:10809")
+    session = AiohttpSession()
     bot, dp = make_bot(token, session=session)
     monitor = Monitor(bot=bot)
 
