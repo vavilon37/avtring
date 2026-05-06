@@ -139,7 +139,7 @@ class AvitoParser:
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=PROFILE_DIR,
             executable_path=chrome_path,
-            headless=True if chrome_path is None else False,
+            headless=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
