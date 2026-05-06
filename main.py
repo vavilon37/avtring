@@ -26,8 +26,8 @@ async def main():
 
     await init_db()
 
-    # Telegram через SOCKS5 прокси Happ, Avito — напрямую через Playwright
-    session = AiohttpSession(proxy="socks5://127.0.0.1:10808")
+    # Telegram через HTTP прокси Happ (10809 стабильнее SOCKS5 для TLS на Windows)
+    session = AiohttpSession(proxy="http://127.0.0.1:10809")
     bot, dp = make_bot(token, session=session)
     monitor = Monitor(bot=bot)
 
@@ -35,7 +35,16 @@ async def main():
     logger.info("Bot started. Press Ctrl+C to stop.")
 
     try:
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+        while True:
+            try:
+                await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+                break  # чистый выход (Ctrl+C)
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                logger.warning(f"Polling упал: {e}")
+                logger.info("Жду 15 секунд и переподключаюсь (проверь что Happ запущен)...")
+                await asyncio.sleep(15)
     finally:
         await monitor.stop()
         await bot.session.close()

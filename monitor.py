@@ -7,6 +7,10 @@ import database as db
 from database import FREE_INTERVAL, PAID_INTERVAL
 from parser import AvitoParser
 from bot import send_listing
+from listing_filter import filter_listings, filter_after_detail, listing_datetime
+
+MAX_DETAIL_FETCH = 10   # max detail pages per cycle
+DETAIL_CONCURRENCY = 2  # simultaneous browser tabs for detail pages
 
 logger = logging.getLogger(__name__)
 
@@ -103,17 +107,35 @@ class Monitor:
         try:
             listings = await self._parser.fetch_listings(url)
             new_listings = await db.filter_new_listings(watch_id, listings)
+            new_listings = filter_listings(new_listings)  # drop accessories + old
 
             if not new_listings:
-                logger.debug(f"Watch {watch_id}: no new listings")
+                logger.debug(f"Watch {watch_id}: no new after pre-filter")
                 return
 
-            logger.info(f"Watch {watch_id}: {len(new_listings)} new listings for user {user_id}")
+            # Sort by freshness, take only the newest N
+            new_listings.sort(key=listing_datetime, reverse=True)
+            to_enrich = new_listings[:MAX_DETAIL_FETCH]
 
-            for listing in new_listings:
-                detailed = await self._parser.fetch_listing_detail(listing)
-                await send_listing(self.bot, user_id, detailed, label)
-                await asyncio.sleep(0.5)
+            logger.info(f"Watch {watch_id}: {len(new_listings)} new → enriching top {len(to_enrich)}")
+
+            # Fetch details in parallel
+            sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
+
+            async def _enrich(lst):
+                async with sem:
+                    try:
+                        return await self._parser.fetch_listing_detail(lst)
+                    except Exception as e:
+                        logger.warning(f"Detail fetch failed {lst.get('id')}: {e}")
+                        return lst
+
+            detailed_listings = list(await asyncio.gather(*[_enrich(l) for l in to_enrich]))
+            detailed_listings = filter_after_detail(detailed_listings)  # drop resellers
+
+            for listing in detailed_listings:
+                await send_listing(self.bot, user_id, listing, label)
+                await asyncio.sleep(0.4)
 
         except Exception as e:
             logger.error(f"Watch {watch_id} error: {e}")

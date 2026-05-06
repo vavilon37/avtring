@@ -177,7 +177,7 @@ class AvitoParser:
             await self._pw.stop()
         logger.info("Parser stopped")
 
-    async def _get_html(self, url: str, referer: str = "") -> str:
+    async def _get_html(self, url: str, referer: str = "", wait_selector: str = "") -> str:
         page = await self._context.new_page()
         try:
             if referer:
@@ -186,30 +186,42 @@ class AvitoParser:
             await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-            # Wait for listings to appear in DOM (JS-rendered)
-            try:
-                await page.wait_for_selector('[data-marker="item"]', timeout=25000)
-            except Exception:
-                # Try scrolling to trigger lazy load
-                await page.evaluate("window.scrollBy(0, 300)")
-                await asyncio.sleep(3)
+            if wait_selector:
                 try:
-                    await page.wait_for_selector('[data-marker="item"]', timeout=10000)
+                    await page.wait_for_selector(wait_selector, timeout=20000)
                 except Exception:
-                    html = await page.content()
-                    logger.warning(f"No listings selector after wait for {url}, html_len={len(html)}")
-                    from pathlib import Path
-                    Path("last_failed_page.html").write_text(html, encoding="utf-8")
-                    logger.warning("Saved last_failed_page.html for debug")
-                    return ""
+                    await page.evaluate("window.scrollBy(0, 300)")
+                    await asyncio.sleep(2)
+                    try:
+                        # fallback selectors for detail page
+                        fallbacks = [
+                            '[data-marker="item-view/item-description"]',
+                            '[data-marker="seller-info/name"]',
+                            '[data-marker="item-view/item-price"]',
+                        ]
+                        found = False
+                        for sel in fallbacks:
+                            try:
+                                await page.wait_for_selector(sel, timeout=5000)
+                                found = True
+                                break
+                            except Exception:
+                                continue
+                        if not found:
+                            html = await page.content()
+                            logger.warning(f"No selector for {url}, html_len={len(html)}")
+                            Path("last_failed_page.html").write_text(html, encoding="utf-8")
+                            return ""
+                    except Exception:
+                        return ""
+            else:
+                await asyncio.sleep(random.uniform(1.5, 2.5))
 
             # Human-like scroll
             await page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
-            await asyncio.sleep(random.uniform(1.0, 2.0))
+            await asyncio.sleep(random.uniform(0.5, 1.0))
 
-            html = await page.content()
-
-            return html
+            return await page.content()
         except Exception as e:
             logger.error(f"Page error {url}: {e}")
             return ""
@@ -218,7 +230,7 @@ class AvitoParser:
 
     async def fetch_listings(self, url: str) -> list[dict]:
         await asyncio.sleep(random.uniform(1.0, 3.0))
-        html = await self._get_html(url)
+        html = await self._get_html(url, wait_selector='[data-marker="item"]')
         if not html:
             return []
         return self._parse_list_html(html, url)
@@ -227,12 +239,16 @@ class AvitoParser:
         url = listing["link"]
         if not url:
             return listing
-        # Strip query params — detail page doesn't need them
         from urllib.parse import urlparse, urlunparse
         parsed = urlparse(url)
         clean_url = urlunparse(parsed._replace(query="", fragment=""))
-        await asyncio.sleep(random.uniform(1.5, 3.0))
-        html = await self._get_html(clean_url, referer="https://www.avito.ru/")
+        await asyncio.sleep(random.uniform(0.5, 1.2))
+        # Try fast selector first (title loads before description)
+        html = await self._get_html(
+            clean_url,
+            referer="https://www.avito.ru/",
+            wait_selector='[data-marker="item-view/title-info"]',
+        )
         if not html:
             return listing
         return self._parse_detail_html(html, listing)

@@ -284,7 +284,10 @@ async def _cb_model_toggle(cb: CallbackQuery, state: FSMContext):
         selected.append(q)
 
     await state.update_data(selected_models=selected)
-    await cb.message.edit_reply_markup(reply_markup=_kb_models(set(selected)))
+    try:
+        await cb.message.edit_reply_markup(reply_markup=_kb_models(set(selected)))
+    except Exception:
+        pass
     await cb.answer()
 
 
@@ -293,7 +296,10 @@ async def _cb_model_done(cb: CallbackQuery, state: FSMContext):
     selected: list = data.get("selected_models", [])
     query = " ".join(selected) if selected else ""
     await state.update_data(query=query)
-    await cb.message.edit_reply_markup()
+    try:
+        await cb.message.edit_reply_markup()
+    except Exception:
+        pass
     await cb.message.answer(
         "💰 <b>Шаг 2/6 — Минимальная цена (₽)</b>\n\n"
         "Введи число или <b>0</b> чтобы пропустить:",
@@ -329,7 +335,10 @@ async def _handle_price_max(msg: Message, state: FSMContext):
 async def _cb_condition(cb: CallbackQuery, state: FSMContext):
     val = cb.data.split(":", 1)[1]
     await state.update_data(condition=val)
-    await cb.message.edit_reply_markup()
+    try:
+        await cb.message.edit_reply_markup()
+    except Exception:
+        pass
     await cb.message.answer(
         "👤 <b>Шаг 5/6 — Тип продавца</b>",
         parse_mode="HTML",
@@ -341,7 +350,10 @@ async def _cb_condition(cb: CallbackQuery, state: FSMContext):
 async def _cb_seller(cb: CallbackQuery, state: FSMContext):
     val = cb.data.split(":", 1)[1]
     await state.update_data(seller_type=val)
-    await cb.message.edit_reply_markup()
+    try:
+        await cb.message.edit_reply_markup()
+    except Exception:
+        pass
     await cb.message.answer(
         "🏙 <b>Шаг 6/6 — Город</b>",
         parse_mode="HTML",
@@ -363,7 +375,10 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
     plan = await db.get_user_plan(cb.from_user.id)
     interval_note = "каждые 15 секунд" if plan in ("paid", "trial") else "раз в 5 минут"
 
-    await cb.message.edit_reply_markup()
+    try:
+        await cb.message.edit_reply_markup()
+    except Exception:
+        pass
     await cb.message.answer(
         f"✅ <b>Поиск создан!</b>\n\n"
         f"🔍 {label}\n\n"
