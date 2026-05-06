@@ -117,10 +117,14 @@ HTMLCanvasElement.prototype.toDataURL = function(type) {
 """
 
 
+BLOCK_COOLDOWN = 600   # 10 min pause after captcha detected
+
+
 class AvitoParser:
     def __init__(self):
         self._pw = None
         self._context: BrowserContext | None = None
+        self._blocked_until: float = 0
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -132,27 +136,28 @@ class AvitoParser:
             await self._context.close()
 
         ua = random.choice(USER_AGENTS)
-
-        # Persistent context — saves cookies/localStorage between restarts
-        # headless=False makes it indistinguishable from real Chrome
         chrome_path = CHROME_PATH if Path(CHROME_PATH).exists() else None
+
+        args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-infobars",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-session-crashed-bubble",
+            "--disable-restore-session-state",
+            "--restore-last-session=false",
+            "--window-size=1366,768",
+            "--disable-features=VizDisplayCompositor",
+            f"--user-agent={ua}",
+        ]
+
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=PROFILE_DIR,
             executable_path=chrome_path,
             headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-infobars",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-session-crashed-bubble",
-                "--disable-restore-session-state",
-                "--restore-last-session=false",
-                "--window-size=1366,768",
-                f"--user-agent={ua}",
-            ],
+            args=args,
             user_agent=ua,
             locale="ru-RU",
             timezone_id="Europe/Moscow",
@@ -165,7 +170,6 @@ class AvitoParser:
         )
         await self._context.add_init_script(STEALTH_SCRIPT)
 
-        # Close any restored pages from previous session
         for page in self._context.pages[1:]:
             await page.close()
 
@@ -187,23 +191,33 @@ class AvitoParser:
             "доступ ограничен" in lower
             or 'class="firewall' in lower
             or ("captcha" in lower and len(html) < 50_000)
+            or len(html) < 30_000
         )
 
     async def _get_html(self, url: str, referer: str = "", wait_selector: str = "") -> str:
+        # If we're in cooldown after a block — skip
+        import time
+        if time.time() < self._blocked_until:
+            wait_sec = int(self._blocked_until - time.time())
+            logger.info(f"Cooldown after block, {wait_sec}s left — skipping {url}")
+            return ""
+
         page = await self._context.new_page()
         try:
             if referer:
                 await page.set_extra_http_headers({"Referer": referer})
 
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(1.5, 3.5))
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-            # Detect IP block / captcha before waiting for any selector
+            # Detect IP block / captcha
             early_html = await page.content()
             if self._is_blocked(early_html):
+                import time
+                self._blocked_until = time.time() + BLOCK_COOLDOWN
                 logger.warning(
-                    f"Avito IP block/captcha at {url} — "
-                    f"run warmup.py and solve the captcha manually, then restart"
+                    f"Avito block/captcha detected (html_len={len(early_html)}) — "
+                    f"pausing {BLOCK_COOLDOWN//60} min. To fix: open Chrome with the profile, visit avito.ru, solve captcha."
                 )
                 Path("last_failed_page.html").write_text(early_html, encoding="utf-8")
                 return ""
