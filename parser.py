@@ -1,10 +1,13 @@
 import asyncio
 import random
 import logging
+from pathlib import Path
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, Browser, BrowserContext
+from playwright.async_api import async_playwright, BrowserContext
 
 logger = logging.getLogger(__name__)
+
+PROFILE_DIR = str(Path(__file__).parent / "chrome_profile")
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -13,53 +16,161 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
 
+# Comprehensive stealth: removes all automation fingerprints
 STEALTH_SCRIPT = """
+// Remove webdriver flag
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+
+// Fake plugins (real browser has plugins)
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const arr = [
+            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
+            {name: 'Native Client', filename: 'internal-nacl-plugin', description: ''},
+        ];
+        arr.__proto__ = PluginArray.prototype;
+        return arr;
+    }
+});
+
+// Fake mimeTypes
+Object.defineProperty(navigator, 'mimeTypes', {
+    get: () => {
+        const arr = [
+            {type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format'},
+        ];
+        arr.__proto__ = MimeTypeArray.prototype;
+        return arr;
+    }
+});
+
+// Russian languages
 Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU', 'ru', 'en-US', 'en']});
-window.chrome = {runtime: {}};
+Object.defineProperty(navigator, 'language', {get: () => 'ru-RU'});
+
+// Hardware concurrency (real CPU cores)
+Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+
+// Device memory
+Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+
+// Proper chrome object
+window.chrome = {
+    runtime: {
+        id: undefined,
+        connect: function(){},
+        sendMessage: function(){},
+        onMessage: {addListener: function(){}, removeListener: function(){}},
+    },
+    loadTimes: function(){
+        return {
+            requestTime: Date.now() / 1000 - Math.random() * 2,
+            startLoadTime: Date.now() / 1000 - Math.random() * 1.5,
+            commitLoadTime: Date.now() / 1000 - Math.random() * 1,
+            finishDocumentLoadTime: Date.now() / 1000 - Math.random() * 0.5,
+            finishLoadTime: Date.now() / 1000,
+            firstPaintTime: Date.now() / 1000 - Math.random() * 0.3,
+            firstPaintAfterLoadTime: 0,
+            navigationType: 'Other',
+            wasFetchedViaSpdy: false,
+            wasNpnNegotiated: true,
+            npnNegotiatedProtocol: 'h2',
+            wasAlternateProtocolAvailable: false,
+            connectionInfo: 'h2',
+        };
+    },
+    csi: function(){ return {startE: Date.now(), onloadT: Date.now() + 300, pageT: 1200, tran: 15}; },
+    app: {isInstalled: false, InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'}, RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'}},
+};
+
+// Permissions API
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications'
+        ? Promise.resolve({state: Notification.permission})
+        : originalQuery(parameters)
+);
+
+// WebGL vendor/renderer spoofing
+const getParameter = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(parameter) {
+    if (parameter === 37445) return 'Intel Inc.';
+    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+    return getParameter.call(this, parameter);
+};
+
+// Canvas fingerprint noise
+const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+HTMLCanvasElement.prototype.toDataURL = function(type) {
+    const ctx = this.getContext('2d');
+    if (ctx) {
+        const imageData = ctx.getImageData(0, 0, this.width, this.height);
+        for (let i = 0; i < imageData.data.length; i += 100) {
+            imageData.data[i] = imageData.data[i] ^ 1;
+        }
+        ctx.putImageData(imageData, 0, 0);
+    }
+    return originalToDataURL.apply(this, arguments);
+};
 """
 
 
 class AvitoParser:
     def __init__(self):
         self._pw = None
-        self._browser: Browser | None = None
         self._context: BrowserContext | None = None
 
     async def start(self):
         self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(
-            headless=True,
+        await self._new_context()
+        logger.info("Parser started (Playwright persistent)")
+
+    async def _new_context(self):
+        if self._context:
+            await self._context.close()
+
+        ua = random.choice(USER_AGENTS)
+
+        # Persistent context — saves cookies/localStorage between restarts
+        # headless=False makes it indistinguishable from real Chrome
+        self._context = await self._pw.chromium.launch_persistent_context(
+            user_data_dir=PROFILE_DIR,
+            headless=False,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--window-size=1366,768",
+                "--start-maximized",
+                f"--user-agent={ua}",
             ],
-        )
-        await self._new_context()
-        logger.info("Parser started (Playwright)")
-
-    async def _new_context(self):
-        if self._context:
-            await self._context.close()
-        self._context = await self._browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
+            user_agent=ua,
             locale="ru-RU",
             timezone_id="Europe/Moscow",
             viewport={"width": 1366, "height": 768},
             extra_http_headers={
                 "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
             },
         )
         await self._context.add_init_script(STEALTH_SCRIPT)
+        logger.info("New browser context created")
 
     async def stop(self):
         if self._context:
             await self._context.close()
-        if self._browser:
-            await self._browser.close()
         if self._pw:
             await self._pw.stop()
         logger.info("Parser stopped")
@@ -69,8 +180,18 @@ class AvitoParser:
         try:
             if referer:
                 await page.set_extra_http_headers({"Referer": referer})
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(random.uniform(1.5, 3.0))
+
+            # Random human-like delay before navigation
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+            # Simulate human reading the page
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+
+            # Random scroll to look human
+            await page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+
             html = await page.content()
 
             if "captcha" in html.lower() and 'data-marker="item"' not in html:
@@ -90,14 +211,13 @@ class AvitoParser:
         html = await self._get_html(url)
         if not html:
             return []
-        listings = self._parse_list_html(html, url)
-        return listings
+        return self._parse_list_html(html, url)
 
     async def fetch_listing_detail(self, listing: dict) -> dict:
         url = listing["link"]
         if not url:
             return listing
-        await asyncio.sleep(random.uniform(0.8, 2.0))
+        await asyncio.sleep(random.uniform(1.5, 3.0))
         html = await self._get_html(url, referer="https://www.avito.ru/")
         if not html:
             return listing
