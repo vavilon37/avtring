@@ -135,10 +135,11 @@ class AvitoParser:
 
         # Persistent context — saves cookies/localStorage between restarts
         # headless=False makes it indistinguishable from real Chrome
+        chrome_path = CHROME_PATH if Path(CHROME_PATH).exists() else None
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=PROFILE_DIR,
-            executable_path=CHROME_PATH,
-            headless=False,
+            executable_path=chrome_path,
+            headless=True if chrome_path is None else False,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
