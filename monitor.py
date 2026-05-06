@@ -52,15 +52,20 @@ class Monitor:
     async def _loop(self):
         await asyncio.sleep(3)
         while self._running:
-            await self._tick()
+            try:
+                await self._tick()
+            except Exception as e:
+                logger.error(f"Monitor tick crashed: {e}", exc_info=True)
             jitter = random.uniform(-3, 3)
             await asyncio.sleep(max(5, PAID_INTERVAL + jitter))
 
     async def _tick(self):
+        logger.info("Monitor tick")
         watches = await db.get_all_watches()
         await self._ensure_parser(bool(watches))
 
         if not watches:
+            logger.info("No watches in DB")
             return
 
         now = asyncio.get_event_loop().time()
