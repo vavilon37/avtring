@@ -7,7 +7,7 @@ from playwright.async_api import async_playwright, BrowserContext
 
 logger = logging.getLogger(__name__)
 
-PROFILE_DIR = r"C:\avito_chrome_profile"
+PROFILE_DIR = str(Path(__file__).parent / "chrome_profile")
 CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 USER_AGENTS = [
@@ -178,6 +178,17 @@ class AvitoParser:
             await self._pw.stop()
         logger.info("Parser stopped")
 
+    @staticmethod
+    def _is_blocked(html: str) -> bool:
+        if len(html) > 100_000:
+            return False
+        lower = html.lower()
+        return (
+            "доступ ограничен" in lower
+            or 'class="firewall' in lower
+            or ("captcha" in lower and len(html) < 50_000)
+        )
+
     async def _get_html(self, url: str, referer: str = "", wait_selector: str = "") -> str:
         page = await self._context.new_page()
         try:
@@ -186,6 +197,16 @@ class AvitoParser:
 
             await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            # Detect IP block / captcha before waiting for any selector
+            early_html = await page.content()
+            if self._is_blocked(early_html):
+                logger.warning(
+                    f"Avito IP block/captcha at {url} — "
+                    f"run warmup.py and solve the captcha manually, then restart"
+                )
+                Path("last_failed_page.html").write_text(early_html, encoding="utf-8")
+                return ""
 
             if wait_selector:
                 try:
