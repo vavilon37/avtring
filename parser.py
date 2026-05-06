@@ -7,7 +7,8 @@ from playwright.async_api import async_playwright, BrowserContext
 
 logger = logging.getLogger(__name__)
 
-PROFILE_DIR = str(Path(__file__).parent / "chrome_profile")
+PROFILE_DIR = r"C:\avito_chrome_profile"
+CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -136,15 +137,19 @@ class AvitoParser:
         # headless=False makes it indistinguishable from real Chrome
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=PROFILE_DIR,
+            executable_path=CHROME_PATH,
             headless=False,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
-                "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-infobars",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-session-crashed-bubble",
+                "--disable-restore-session-state",
+                "--restore-last-session=false",
                 "--window-size=1366,768",
-                "--start-maximized",
                 f"--user-agent={ua}",
             ],
             user_agent=ua,
@@ -155,17 +160,14 @@ class AvitoParser:
                 "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Encoding": "gzip, deflate, br",
-                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1",
             },
         )
         await self._context.add_init_script(STEALTH_SCRIPT)
+
+        # Close any restored pages from previous session
+        for page in self._context.pages[1:]:
+            await page.close()
+
         logger.info("New browser context created")
 
     async def stop(self):
@@ -181,23 +183,31 @@ class AvitoParser:
             if referer:
                 await page.set_extra_http_headers({"Referer": referer})
 
-            # Random human-like delay before navigation
             await asyncio.sleep(random.uniform(0.5, 1.5))
-            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-            # Simulate human reading the page
-            await asyncio.sleep(random.uniform(2.0, 4.0))
+            # Wait for listings to appear in DOM (JS-rendered)
+            try:
+                await page.wait_for_selector('[data-marker="item"]', timeout=25000)
+            except Exception:
+                # Try scrolling to trigger lazy load
+                await page.evaluate("window.scrollBy(0, 300)")
+                await asyncio.sleep(3)
+                try:
+                    await page.wait_for_selector('[data-marker="item"]', timeout=10000)
+                except Exception:
+                    html = await page.content()
+                    logger.warning(f"No listings selector after wait for {url}, html_len={len(html)}")
+                    from pathlib import Path
+                    Path("last_failed_page.html").write_text(html, encoding="utf-8")
+                    logger.warning("Saved last_failed_page.html for debug")
+                    return ""
 
-            # Random scroll to look human
+            # Human-like scroll
             await page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(1.0, 2.0))
 
             html = await page.content()
-
-            if "captcha" in html.lower() and 'data-marker="item"' not in html:
-                logger.warning(f"Captcha detected for {url}, rotating context...")
-                await self._new_context()
-                return ""
 
             return html
         except Exception as e:

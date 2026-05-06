@@ -73,9 +73,9 @@ def build_avito_url(filters: dict) -> str:
     if condition:
         params["cnd"] = condition
     if seller_type == "private":
-        params["user"] = "1"
+        params["seller_type"] = "private"
     elif seller_type == "company":
-        params["user"] = "2"
+        params["seller_type"] = "shop"
 
     # Сортировка по дате (новые сначала)
     params["sort"] = "date"

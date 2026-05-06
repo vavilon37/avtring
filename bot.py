@@ -41,8 +41,8 @@ class AddWatch(StatesGroup):
 
 # ── Bot factory ──────────────────────────────────────────────────────────────
 
-def make_bot(token: str) -> tuple[Bot, Dispatcher]:
-    bot = Bot(token=token)
+def make_bot(token: str, session=None) -> tuple[Bot, Dispatcher]:
+    bot = Bot(token=token, session=session)
     dp  = Dispatcher(storage=MemoryStorage())
     _register_handlers(dp)
     return bot, dp

@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 
 from aiogram import Bot
+from aiogram.client.session.aiohttp import AiohttpSession
 from bot import make_bot
 from database import init_db
 from monitor import Monitor
@@ -23,12 +24,12 @@ async def main():
     if not token:
         raise RuntimeError("BOT_TOKEN не задан в .env файле")
 
-    interval = int(os.getenv("CHECK_INTERVAL", "15"))
-
     await init_db()
 
-    bot, dp = make_bot(token)
-    monitor = Monitor(bot=bot, interval=interval)
+    # Telegram через SOCKS5 прокси Happ, Avito — напрямую через Playwright
+    session = AiohttpSession(proxy="socks5://127.0.0.1:10808")
+    bot, dp = make_bot(token, session=session)
+    monitor = Monitor(bot=bot)
 
     await monitor.start()
     logger.info("Bot started. Press Ctrl+C to stop.")

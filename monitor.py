@@ -12,18 +12,17 @@ logger = logging.getLogger(__name__)
 
 
 class Monitor:
-    def __init__(self, bot: Bot, interval: int = PAID_INTERVAL):
+    def __init__(self, bot: Bot):
         self.bot = bot
-        self.interval = interval
         self._parser = AvitoParser()
+        self._parser_started = False
         self._running = False
         self._task: asyncio.Task | None = None
 
     async def start(self):
-        await self._parser.start()
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        logger.info(f"Monitor started")
+        logger.info("Monitor started")
 
     async def stop(self):
         self._running = False
@@ -33,8 +32,18 @@ class Monitor:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        await self._parser.stop()
+        if self._parser_started:
+            await self._parser.stop()
+            self._parser_started = False
         logger.info("Monitor stopped")
+
+    async def _ensure_parser(self, has_watches: bool):
+        if has_watches and not self._parser_started:
+            await self._parser.start()
+            self._parser_started = True
+        elif not has_watches and self._parser_started:
+            await self._parser.stop()
+            self._parser_started = False
 
     async def _loop(self):
         await asyncio.sleep(3)
@@ -45,6 +54,8 @@ class Monitor:
 
     async def _tick(self):
         watches = await db.get_all_watches()
+        await self._ensure_parser(bool(watches))
+
         if not watches:
             return
 
@@ -60,7 +71,6 @@ class Monitor:
             else:
                 free_watches.append(watch)
 
-        # Paid: check every tick (~15s)
         if paid_watches:
             logger.info(f"Checking {len(paid_watches)} paid watches")
             sem = asyncio.Semaphore(3)
@@ -71,7 +81,6 @@ class Monitor:
 
             await asyncio.gather(*[check_paid(w) for w in paid_watches], return_exceptions=True)
 
-        # Free: check only if enough time passed (~5 min)
         if free_watches:
             last = getattr(self, "_last_free_check", 0)
             if now - last >= FREE_INTERVAL:
