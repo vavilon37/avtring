@@ -23,6 +23,13 @@ from payments import create_invoice, check_invoice, PRICE_RUB, SUBSCRIPTION_DAYS
 
 logger = logging.getLogger(__name__)
 
+_monitor = None
+
+def set_monitor(monitor) -> None:
+    global _monitor
+    _monitor = monitor
+
+
 BTN_ADD  = "➕ Добавить поиск"
 BTN_LIST = "📋 Мои поиски"
 BTN_STOP = "🗑 Удалить поиск"
@@ -422,6 +429,16 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=_main_menu(),
     )
+
+    if _monitor:
+        await cb.message.answer("🔍 Ищу свежие объявления для превью...")
+        previews = await _monitor.fetch_preview(url)
+        if previews:
+            await cb.message.answer("📍 <b>Пара свежих объявлений по твоему запросу:</b>", parse_mode="HTML")
+            for p in previews:
+                await send_listing(cb.bot, cb.from_user.id, p, f"Превью · {label}")
+        else:
+            await cb.message.answer("ℹ️ Сейчас свежих объявлений нет — как появятся, сразу пришлю.")
 
 
 async def _cmd_ref(msg: Message):

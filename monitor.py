@@ -36,6 +36,7 @@ class Monitor:
         self._blocks_today: int = 0
         self._sent_today: int = 0
         self._stats_date: str = ""
+        self._tick_sent: dict[int, set] = {}  # user_id -> listing_ids sent this tick
 
     async def _notify_empty_params(self):
         try:
@@ -83,6 +84,18 @@ class Monitor:
             )
         except Exception as e:
             logger.warning(f"Failed to send block notification: {e}")
+
+    async def fetch_preview(self, url: str, limit: int = 2) -> list[dict]:
+        if not self._parser_started:
+            return []
+        try:
+            listings = await asyncio.wait_for(
+                self._parser.fetch_listings(url), timeout=30.0
+            )
+            return filter_listings(listings)[:limit]
+        except Exception as e:
+            logger.warning(f"Preview fetch failed: {e}")
+            return []
 
     def register_handlers(self, dp):
         monitor = self
@@ -173,6 +186,7 @@ class Monitor:
 
     async def _tick(self) -> bool:
         logger.info("Monitor tick")
+        self._tick_sent.clear()
         watches = await db.get_all_watches()
         await self._ensure_parser(bool(watches))
 
@@ -291,6 +305,10 @@ class Monitor:
                         self._empty_params_streak = 0
                         self._empty_params_alerted = False
 
+                    user_sent = self._tick_sent.setdefault(watch["user_id"], set())
+                    if listing["id"] in user_sent:
+                        continue
+                    user_sent.add(listing["id"])
                     await send_listing(self.bot, watch["user_id"], listing, label)
                     self._sent_today += 1
                     await asyncio.sleep(0.4)
