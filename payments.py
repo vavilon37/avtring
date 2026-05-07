@@ -5,7 +5,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 CRYPTO_BOT_API = "https://pay.crypt.bot/api"
-PRICE_RUB = 550
+PRICE_RUB = 545
 SUBSCRIPTION_DAYS = 5
 
 
