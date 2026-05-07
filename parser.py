@@ -136,7 +136,7 @@ if (window.AudioContext || window.webkitAudioContext) {{
 """
 
 
-BLOCK_COOLDOWN = 600   # 10 min pause after captcha detected
+BLOCK_COOLDOWNS = [120, 300, 600]  # 2 min → 5 min → 10 min backoff
 
 
 class AvitoParser:
@@ -144,6 +144,7 @@ class AvitoParser:
         self._pw = None
         self._context: BrowserContext | None = None
         self._blocked_until: float = 0
+        self._block_count: int = 0
         self._on_blocked = on_blocked
         self._request_count: int = 0
         self._rotate_at: int = random.randint(20, 30)
@@ -272,10 +273,12 @@ class AvitoParser:
 
             early_html = await page.content()
             if self._is_blocked(early_html):
-                self._blocked_until = time.time() + BLOCK_COOLDOWN
+                cooldown = BLOCK_COOLDOWNS[min(self._block_count, len(BLOCK_COOLDOWNS) - 1)]
+                self._blocked_until = time.time() + cooldown
+                self._block_count += 1
                 logger.warning(
                     f"Avito block/captcha detected (html_len={len(early_html)}) — "
-                    f"pausing {BLOCK_COOLDOWN//60} min."
+                    f"attempt {self._block_count}, pausing {cooldown//60} min."
                 )
                 Path("last_failed_page.html").write_text(early_html, encoding="utf-8")
                 if self._on_blocked:
@@ -321,6 +324,7 @@ class AvitoParser:
             await self._human_scroll(page)
             await asyncio.sleep(random.uniform(0.4, 1.0))
 
+            self._block_count = 0  # successful request — reset backoff
             return await page.content()
         except Exception as e:
             logger.error(f"Page error {url}: {e}")

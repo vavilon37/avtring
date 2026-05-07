@@ -5,7 +5,7 @@ from aiogram import Bot
 
 import database as db
 from database import FREE_INTERVAL, PAID_INTERVAL
-from parser import AvitoParser, BLOCK_COOLDOWN
+from parser import AvitoParser, BLOCK_COOLDOWNS
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime
 
@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 OWNER_ID = 8501271486  # @yodealer
 
 
+EMPTY_PARAMS_THRESHOLD = 5  # alert after this many consecutive listings with no params
+
 class Monitor:
     def __init__(self, bot: Bot):
         self.bot = bot
@@ -25,6 +27,23 @@ class Monitor:
         self._parser_started = False
         self._running = False
         self._task: asyncio.Task | None = None
+        self._empty_params_streak: int = 0
+        self._empty_params_alerted: bool = False
+
+    async def _notify_empty_params(self):
+        try:
+            await self.bot.send_message(
+                chat_id=OWNER_ID,
+                text=(
+                    "⚠️ <b>Авито изменил разметку страницы</b>\n\n"
+                    f"Последние {EMPTY_PARAMS_THRESHOLD} объявлений пришли без характеристик "
+                    "(экран, корпус, память и т.д.).\n\n"
+                    "Скорее всего Авито обновил HTML — нужно проверить парсер."
+                ),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send empty params notification: {e}")
 
     async def _notify_blocked(self):
         try:
@@ -33,7 +52,7 @@ class Monitor:
                 text=(
                     "⚠️ <b>Авито заблокировал парсер</b>\n\n"
                     "Обнаружена капча или IP-блокировка.\n"
-                    f"Пауза {BLOCK_COOLDOWN // 60} минут, потом попробую снова.\n\n"
+                    f"Пауза до {BLOCK_COOLDOWNS[-1] // 60} минут (нарастает), потом попробую снова.\n\n"
                     "Если не восстановится — прогрей профиль вручную:\n"
                     "<code>chrome.exe --user-data-dir=\"chrome_profile\"</code>\n"
                     "→ зайди на avito.ru → реши капчу → закрой Chrome → перезапусти бота."
@@ -175,6 +194,16 @@ class Monitor:
             detailed_listings = filter_after_detail(detailed_listings)
 
             for listing in detailed_listings:
+                # Track empty params streak to detect Avito HTML changes
+                if not listing.get("params"):
+                    self._empty_params_streak += 1
+                    if self._empty_params_streak >= EMPTY_PARAMS_THRESHOLD and not self._empty_params_alerted:
+                        self._empty_params_alerted = True
+                        await self._notify_empty_params()
+                else:
+                    self._empty_params_streak = 0
+                    self._empty_params_alerted = False
+
                 await send_listing(self.bot, user_id, listing, label)
                 await asyncio.sleep(0.4)
 
