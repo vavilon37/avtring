@@ -63,6 +63,10 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN trial_bonus_days INTEGER DEFAULT 0")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN is_paused INTEGER DEFAULT 0")
+        except Exception:
+            pass
         await db.commit()
     logger.info("Database initialized")
 
@@ -234,6 +238,50 @@ async def clean_old_seen_listings(days: int = 30):
         await db.commit()
         if cursor.rowcount:
             logger.info(f"Cleaned {cursor.rowcount} old seen_listings entries")
+
+
+async def pause_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET is_paused = 1 WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
+async def resume_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET is_paused = 0 WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
+async def is_user_paused(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT is_paused FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return bool(row and row[0])
+
+
+async def get_expiring_soon(hours: int = 24) -> list[dict]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cutoff = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT user_id, sub_expires_at FROM users "
+            "WHERE sub_expires_at > ? AND sub_expires_at <= ?",
+            (now_iso, cutoff),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_all_users() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT u.user_id, u.sub_expires_at, u.trial_started_at, "
+            "u.trial_bonus_days, u.is_paused, COUNT(w.id) as watch_count "
+            "FROM users u LEFT JOIN watches w ON u.user_id = w.user_id "
+            "GROUP BY u.user_id ORDER BY u.user_id DESC"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def apply_referral(new_user_id: int, referrer_id: int) -> bool:

@@ -15,6 +15,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 import database as db
 from database import FREE_MAX_WATCHES, TRIAL_MAX_WATCHES, PAID_MAX_WATCHES, OWNER_ID, OWNER_IDS, TRIAL_DAYS
+from database import pause_user, resume_user, is_user_paused
 from filters import (
     PHONE_MODELS, CONDITIONS, SELLER_TYPES, CITIES,
     build_avito_url, label_from_filters,
@@ -67,6 +68,8 @@ def _register_handlers(dp: Dispatcher):
     dp.message.register(_cmd_stop,  Command("stop"))
     dp.message.register(_cmd_sub,   Command("sub"))
     dp.message.register(_cmd_ref,   Command("ref"))
+    dp.message.register(_cmd_pause,  Command("pause"))
+    dp.message.register(_cmd_resume, Command("resume"))
 
     dp.message.register(_cmd_add,  F.text == BTN_ADD)
     dp.message.register(_cmd_list, F.text == BTN_LIST)
@@ -439,6 +442,33 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
                 await send_listing(cb.bot, cb.from_user.id, p, f"Превью · {label}")
         else:
             await cb.message.answer("ℹ️ Сейчас свежих объявлений нет — как появятся, сразу пришлю.")
+
+
+async def _cmd_pause(msg: Message):
+    await db.ensure_user(msg.from_user.id)
+    if await is_user_paused(msg.from_user.id):
+        await msg.answer("⏸ Мониторинг уже на паузе. Чтобы возобновить — /resume")
+        return
+    await pause_user(msg.from_user.id)
+    await msg.answer(
+        "⏸ <b>Мониторинг поставлен на паузу</b>\n\n"
+        "Уведомления не будут приходить. Чтобы возобновить — /resume",
+        parse_mode="HTML",
+        reply_markup=_main_menu(),
+    )
+
+
+async def _cmd_resume(msg: Message):
+    await db.ensure_user(msg.from_user.id)
+    if not await is_user_paused(msg.from_user.id):
+        await msg.answer("▶️ Мониторинг уже активен.")
+        return
+    await resume_user(msg.from_user.id)
+    await msg.answer(
+        "▶️ <b>Мониторинг возобновлён</b>\n\nСнова слежу за объявлениями.",
+        parse_mode="HTML",
+        reply_markup=_main_menu(),
+    )
 
 
 async def _cmd_ref(msg: Message):

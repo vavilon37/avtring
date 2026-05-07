@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 import database as db
-from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID
+from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID, SUBSCRIPTION_DAYS
 from parser import AvitoParser, BLOCK_COOLDOWNS
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime
@@ -39,6 +39,38 @@ class Monitor:
         self._stats_date: str = ""
         self._tick_sent: dict[int, set] = {}  # user_id -> listing_ids sent this tick
         self._url_last_checked: dict[str, float] = {}  # url -> last check timestamp
+        self._consecutive_failures: int = 0
+        self._last_break: float = 0.0
+        self._last_expiry_check: float = 0.0
+        self._expiry_notified: set[int] = set()
+
+    @property
+    def _delay_mult(self) -> float:
+        if self._blocks_today >= 5:
+            return 2.0
+        if self._blocks_today >= 2:
+            return 1.5
+        return 1.0
+
+    async def _check_expiring_subscriptions(self):
+        expiring = await db.get_expiring_soon(hours=24)
+        for user in expiring:
+            uid = user["user_id"]
+            if uid in self._expiry_notified:
+                continue
+            self._expiry_notified.add(uid)
+            try:
+                await self.bot.send_message(
+                    chat_id=uid,
+                    text=(
+                        "⏰ <b>Подписка заканчивается завтра</b>\n\n"
+                        f"Продли чтобы не прерывать мониторинг — "
+                        f"нажми 💎 Подписка в меню."
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
 
     async def _notify_empty_params(self):
         try:
@@ -159,6 +191,8 @@ class Monitor:
         no_result_streak = 0
         while self._running:
             now = asyncio.get_event_loop().time()
+            real_now = time.time()
+
             if now - self._last_cleanup > 86400:
                 self._last_cleanup = now
                 await db.clean_old_seen_listings()
@@ -168,12 +202,43 @@ class Monitor:
                 self._stats_date = today
                 self._blocks_today = 0
                 self._sent_today = 0
+                self._expiry_notified.clear()
+
+            # Session break every 3-4 hours — looks like a real user
+            break_interval = random.uniform(3 * 3600, 4 * 3600)
+            if real_now - self._last_break > break_interval and self._last_break > 0:
+                break_time = random.uniform(8 * 60, 12 * 60)
+                logger.info(f"Session break: pausing {break_time/60:.0f} min")
+                self._last_break = real_now
+                await asyncio.sleep(break_time)
+                continue
+            if self._last_break == 0:
+                self._last_break = real_now
+
+            # Subscription expiry notifications (once per hour)
+            if real_now - self._last_expiry_check > 3600:
+                self._last_expiry_check = real_now
+                try:
+                    await self._check_expiring_subscriptions()
+                except Exception:
+                    pass
 
             try:
                 found_any = await self._tick()
+                self._consecutive_failures = 0
             except Exception as e:
                 logger.error(f"Monitor tick crashed: {e}", exc_info=True)
                 found_any = False
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= 3:
+                    logger.warning("3 consecutive failures — restarting parser")
+                    try:
+                        await self._parser.stop()
+                        await self._parser.start()
+                        self._parser_started = True
+                        self._consecutive_failures = 0
+                    except Exception as re:
+                        logger.error(f"Parser restart failed: {re}")
 
             if found_any:
                 no_result_streak = 0
@@ -199,9 +264,17 @@ class Monitor:
         now = asyncio.get_event_loop().time()
         found_any = False
 
+        # Clean up _url_last_checked for removed watches
+        active_urls = {w["url"] for w in watches}
+        for url in list(self._url_last_checked):
+            if url not in active_urls:
+                del self._url_last_checked[url]
+
         paid_watches = []
         free_watches = []
         for watch in watches:
+            if await db.is_user_paused(watch["user_id"]):
+                continue
             plan = await db.get_user_plan(watch["user_id"])
             if plan in ("paid", "trial"):
                 paid_watches.append(watch)
@@ -212,18 +285,20 @@ class Monitor:
             url_groups: dict[str, list] = {}
             for w in paid_watches:
                 url_groups.setdefault(w["url"], []).append(w)
+            shuffled = list(url_groups.items())
+            random.shuffle(shuffled)
             logger.info(
                 f"Checking {len(paid_watches)} paid watches "
                 f"→ {len(url_groups)} unique URLs"
             )
             processed = 0
-            for url, watchers in url_groups.items():
+            for url, watchers in shuffled:
                 last_checked = self._url_last_checked.get(url, 0)
                 if now - last_checked < MIN_PAID_URL_INTERVAL:
                     logger.debug(f"Skip {url[:50]} — checked {now - last_checked:.0f}s ago")
                     continue
                 if processed > 0:
-                    await asyncio.sleep(random.uniform(8.0, 20.0))
+                    await asyncio.sleep(random.uniform(8.0, 20.0) * self._delay_mult)
                 self._url_last_checked[url] = now
                 processed += 1
                 if await self._check_url_group(url, watchers):
@@ -236,14 +311,16 @@ class Monitor:
                 url_groups = {}
                 for w in free_watches:
                     url_groups.setdefault(w["url"], []).append(w)
+                shuffled = list(url_groups.items())
+                random.shuffle(shuffled)
                 logger.info(
                     f"Checking {len(free_watches)} free watches "
                     f"→ {len(url_groups)} unique URLs"
                 )
                 processed = 0
-                for url, watchers in url_groups.items():
+                for url, watchers in shuffled:
                     if processed > 0:
-                        await asyncio.sleep(random.uniform(8.0, 20.0))
+                        await asyncio.sleep(random.uniform(8.0, 20.0) * self._delay_mult)
                     processed += 1
                     if await self._check_url_group(url, watchers):
                         found_any = True
@@ -288,7 +365,7 @@ class Monitor:
 
             async def _enrich(lst):
                 async with sem:
-                    await asyncio.sleep(random.uniform(4.0, 9.0))
+                    await asyncio.sleep(random.uniform(4.0, 9.0) * self._delay_mult)
                     try:
                         return await self._parser.fetch_listing_detail(lst)
                     except Exception as e:
