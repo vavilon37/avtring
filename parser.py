@@ -464,16 +464,22 @@ class AvitoParser:
 
         params = {}
 
-        # Method 1: data-marker section (li > span pairs)
+        # Method 1: data-marker section
+        # Avito structure: <span class="d6e8fd2e...">KEY[<span>: </span>][<img>]</span>VALUE_TEXT
+        # Value is a NavigableString after the key span, NOT inside a span
+        from bs4 import NavigableString
         params_section = soup.find(attrs={"data-marker": "item-view/item-params"})
         if params_section:
             for li in params_section.find_all("li"):
-                spans = li.find_all("span")
-                if len(spans) >= 2:
-                    key = spans[0].get_text(strip=True).rstrip(":")
-                    val = self._extract_element_value(spans[1])
-                    if key and val:
-                        params[key] = val
+                key_span = li.find("span", class_="d6e8fd2e3d52b32a")
+                if not key_span:
+                    continue
+                key = "".join(str(c) for c in key_span.children if isinstance(c, NavigableString)).strip().rstrip(":")
+                p_el = key_span.parent
+                val_parts = [str(c).strip() for c in p_el.children if isinstance(c, NavigableString) and str(c).strip()]
+                val = " ".join(val_parts).strip()
+                if key and val:
+                    params[key] = val
 
         # Method 2: dl/dt+dd pairs — always run to catch condition block
         for dl in soup.find_all("dl"):
