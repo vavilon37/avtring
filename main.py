@@ -27,7 +27,8 @@ async def main():
 
     await init_db()
 
-    session = AiohttpSession()
+    tg_proxy = os.getenv("TG_PROXY")  # socks5://user:pass@host:port
+    session = AiohttpSession(proxy=tg_proxy) if tg_proxy else AiohttpSession()
     bot, dp = make_bot(token, session=session)
     monitor = Monitor(bot=bot)
 
@@ -45,7 +46,7 @@ async def main():
                 break
             except Exception as e:
                 logger.warning(f"Polling упал: {e}")
-                logger.info("Жду 15 секунд и переподключаюсь (проверь что Happ запущен)...")
+                logger.info("Жду 15 секунд и переподключаюсь...")
                 await asyncio.sleep(15)
     finally:
         await monitor.stop()

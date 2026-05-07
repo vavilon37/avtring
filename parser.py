@@ -9,6 +9,14 @@ from playwright.async_api import async_playwright, BrowserContext
 
 logger = logging.getLogger(__name__)
 
+try:
+    from playwright_stealth import stealth_async as _stealth_async
+    _HAS_STEALTH = True
+    logger.info("playwright-stealth loaded")
+except ImportError:
+    _HAS_STEALTH = False
+    logger.info("playwright-stealth not installed — using built-in stealth only")
+
 PROFILE_DIR = str(Path(__file__).parent / "chrome_profile")
 PROFILE_DIRS = [
     str(Path(__file__).parent / f"chrome_profile_{i}") for i in range(3)
@@ -194,7 +202,7 @@ class AvitoParser:
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=profile,
             executable_path=chrome_path,
-            headless=True,
+            headless=False,
             args=args,
             user_agent=ua,
             locale="ru-RU",
@@ -319,6 +327,8 @@ class AvitoParser:
 
         page = await context.new_page()
         try:
+            if _HAS_STEALTH:
+                await _stealth_async(page)
             if referer:
                 await page.set_extra_http_headers({"Referer": referer})
 
