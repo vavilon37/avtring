@@ -14,7 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import database as db
-from database import FREE_MAX_WATCHES, PAID_MAX_WATCHES, OWNER_ID, OWNER_IDS, TRIAL_DAYS
+from database import FREE_MAX_WATCHES, TRIAL_MAX_WATCHES, PAID_MAX_WATCHES, OWNER_ID, OWNER_IDS, TRIAL_DAYS
 from filters import (
     PHONE_MODELS, CONDITIONS, SELLER_TYPES, CITIES,
     build_avito_url, label_from_filters,
@@ -149,7 +149,8 @@ async def _plan_text(user_id: int) -> str:
     if plan == "trial":
         user = await db.get_user(user_id)
         started = datetime.fromisoformat(user["trial_started_at"]).replace(tzinfo=timezone.utc)
-        trial_end = started + timedelta(days=TRIAL_DAYS)
+        bonus = user["trial_bonus_days"] if user["trial_bonus_days"] else 0
+        trial_end = started + timedelta(days=TRIAL_DAYS + bonus)
         hours_left = max(0, int((trial_end - datetime.now(timezone.utc)).total_seconds() / 3600))
         return f"🎁 <b>Пробный период</b> — осталось ~{hours_left}ч"
     return "🔒 <b>Нет подписки</b>"
@@ -159,7 +160,11 @@ async def _max_watches(user_id: int) -> int:
     if user_id == OWNER_ID:
         return 999
     plan = await db.get_user_plan(user_id)
-    return PAID_MAX_WATCHES if plan == "paid" else FREE_MAX_WATCHES
+    if plan == "paid":
+        return PAID_MAX_WATCHES
+    if plan == "trial":
+        return TRIAL_MAX_WATCHES
+    return FREE_MAX_WATCHES
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -182,7 +187,7 @@ async def _cmd_start(msg: Message):
                 await msg.bot.send_message(
                     referrer_id,
                     "🎉 <b>По твоей ссылке зарегистрировался новый пользователь!</b>\n"
-                    "+1 день подписки добавлен.",
+                    "+1 день пробного периода добавлен.",
                     parse_mode="HTML",
                 )
             except Exception:

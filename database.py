@@ -6,6 +6,7 @@ logger = logging.getLogger(__name__)
 DB_PATH = "avito_ringer.db"
 
 FREE_MAX_WATCHES = 1
+TRIAL_MAX_WATCHES = 1
 PAID_MAX_WATCHES = 3
 TRIAL_DAYS = 1
 FREE_INTERVAL = 300   # 5 минут
@@ -54,9 +55,12 @@ async def init_db():
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_seen_watch ON seen_listings(watch_id)"
         )
-        # Migration: add referred_by column if missing
         try:
             await db.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN trial_bonus_days INTEGER DEFAULT 0")
         except Exception:
             pass
         await db.commit()
@@ -101,8 +105,9 @@ async def is_trial_active(user_id: int) -> bool:
     started = datetime.fromisoformat(user["trial_started_at"])
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
+    bonus = user["trial_bonus_days"] if user["trial_bonus_days"] else 0
     delta = datetime.now(timezone.utc) - started
-    return delta.days < TRIAL_DAYS
+    return delta.days < (TRIAL_DAYS + bonus)
 
 
 async def get_user_plan(user_id: int) -> str:
@@ -233,8 +238,8 @@ async def clean_old_seen_listings(days: int = 30):
 
 async def apply_referral(new_user_id: int, referrer_id: int) -> bool:
     """
-    Links new_user to referrer and gives referrer +1 day of paid access.
-    Returns True if referral was applied (only once per user).
+    Links new_user to referrer and gives referrer +1 trial day (1 watch limit).
+    Returns True if referral was applied (only once per new user).
     """
     if new_user_id == referrer_id:
         return False
@@ -249,8 +254,11 @@ async def apply_referral(new_user_id: int, referrer_id: int) -> bool:
             "UPDATE users SET referred_by = ? WHERE user_id = ?",
             (referrer_id, new_user_id),
         )
+        await db.execute(
+            "UPDATE users SET trial_bonus_days = COALESCE(trial_bonus_days, 0) + 1 WHERE user_id = ?",
+            (referrer_id,),
+        )
         await db.commit()
-    await activate_subscription(referrer_id, days=1)
     return True
 
 
