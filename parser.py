@@ -1,6 +1,7 @@
 import asyncio
 import random
 import logging
+import time
 from pathlib import Path
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, BrowserContext
@@ -19,55 +20,58 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
 ]
 
-# Comprehensive stealth: removes all automation fingerprints
-STEALTH_SCRIPT = """
-// Remove webdriver flag
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+# Windows-appropriate GPU profiles to match Windows UA
+_WEBGL_PROFILES = [
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (AMD)", "ANGLE (AMD, AMD Radeon RX 580 Series Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+]
 
-// Fake plugins (real browser has plugins)
-Object.defineProperty(navigator, 'plugins', {
-    get: () => {
+
+def _build_stealth_script(webgl_vendor: str, webgl_renderer: str, canvas_seed: int) -> str:
+    return f"""
+// Remove webdriver flag
+Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});
+
+// Fake plugins
+Object.defineProperty(navigator, 'plugins', {{
+    get: () => {{
         const arr = [
-            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
-            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
-            {name: 'Native Client', filename: 'internal-nacl-plugin', description: ''},
+            {{name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'}},
+            {{name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''}},
+            {{name: 'Native Client', filename: 'internal-nacl-plugin', description: ''}},
         ];
         arr.__proto__ = PluginArray.prototype;
         return arr;
-    }
-});
+    }}
+}});
 
-// Fake mimeTypes
-Object.defineProperty(navigator, 'mimeTypes', {
-    get: () => {
+Object.defineProperty(navigator, 'mimeTypes', {{
+    get: () => {{
         const arr = [
-            {type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format'},
+            {{type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format'}},
         ];
         arr.__proto__ = MimeTypeArray.prototype;
         return arr;
-    }
-});
+    }}
+}});
 
-// Russian languages
-Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU', 'ru', 'en-US', 'en']});
-Object.defineProperty(navigator, 'language', {get: () => 'ru-RU'});
+Object.defineProperty(navigator, 'languages', {{get: () => ['ru-RU', 'ru', 'en-US', 'en']}});
+Object.defineProperty(navigator, 'language', {{get: () => 'ru-RU'}});
+Object.defineProperty(navigator, 'hardwareConcurrency', {{get: () => {random.choice([4, 6, 8, 12])}}});
+Object.defineProperty(navigator, 'deviceMemory', {{get: () => {random.choice([4, 8, 16])}}});
 
-// Hardware concurrency (real CPU cores)
-Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
-
-// Device memory
-Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
-
-// Proper chrome object
-window.chrome = {
-    runtime: {
+window.chrome = {{
+    runtime: {{
         id: undefined,
-        connect: function(){},
-        sendMessage: function(){},
-        onMessage: {addListener: function(){}, removeListener: function(){}},
-    },
-    loadTimes: function(){
-        return {
+        connect: function(){{}},
+        sendMessage: function(){{}},
+        onMessage: {{addListener: function(){{}}, removeListener: function(){{}}}},
+    }},
+    loadTimes: function(){{
+        return {{
             requestTime: Date.now() / 1000 - Math.random() * 2,
             startLoadTime: Date.now() / 1000 - Math.random() * 1.5,
             commitLoadTime: Date.now() / 1000 - Math.random() * 1,
@@ -81,45 +85,59 @@ window.chrome = {
             npnNegotiatedProtocol: 'h2',
             wasAlternateProtocolAvailable: false,
             connectionInfo: 'h2',
-        };
-    },
-    csi: function(){ return {startE: Date.now(), onloadT: Date.now() + 300, pageT: 1200, tran: 15}; },
-    app: {isInstalled: false, InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'}, RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'}},
-};
+        }};
+    }},
+    csi: function(){{ return {{startE: Date.now(), onloadT: Date.now() + 300, pageT: 1200, tran: 15}}; }},
+    app: {{isInstalled: false, InstallState: {{DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'}}, RunningState: {{CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'}}}},
+}};
 
-// Permissions API
 const originalQuery = window.navigator.permissions.query;
 window.navigator.permissions.query = (parameters) => (
     parameters.name === 'notifications'
-        ? Promise.resolve({state: Notification.permission})
+        ? Promise.resolve({{state: Notification.permission}})
         : originalQuery(parameters)
 );
 
-// WebGL vendor/renderer spoofing
+// WebGL with randomized GPU profile
 const getParameter = WebGLRenderingContext.prototype.getParameter;
-WebGLRenderingContext.prototype.getParameter = function(parameter) {
-    if (parameter === 37445) return 'Intel Inc.';
-    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+WebGLRenderingContext.prototype.getParameter = function(parameter) {{
+    if (parameter === 37445) return '{webgl_vendor}';
+    if (parameter === 37446) return '{webgl_renderer}';
     return getParameter.call(this, parameter);
-};
+}};
 
-// Canvas fingerprint noise
+// Canvas fingerprint noise — unique per session via seed
+const _seed = {canvas_seed};
 const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-HTMLCanvasElement.prototype.toDataURL = function(type) {
+HTMLCanvasElement.prototype.toDataURL = function(type) {{
     const ctx = this.getContext('2d');
-    if (ctx) {
+    if (ctx) {{
         const imageData = ctx.getImageData(0, 0, this.width, this.height);
-        for (let i = 0; i < imageData.data.length; i += 100) {
-            imageData.data[i] = imageData.data[i] ^ 1;
-        }
+        for (let i = 0; i < imageData.data.length; i += 97 + (_seed % 13)) {{
+            imageData.data[i] = imageData.data[i] ^ (_seed % 3 + 1);
+        }}
         ctx.putImageData(imageData, 0, 0);
-    }
+    }}
     return originalToDataURL.apply(this, arguments);
-};
+}};
+
+// AudioContext fingerprint noise
+if (window.AudioContext || window.webkitAudioContext) {{
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const origGetChannelData = AudioBuffer.prototype.getChannelData;
+    AudioBuffer.prototype.getChannelData = function() {{
+        const arr = origGetChannelData.apply(this, arguments);
+        for (let i = 0; i < arr.length; i += 137) {{
+            arr[i] += (_seed % 100) * 0.0000001;
+        }}
+        return arr;
+    }};
+}}
 """
 
 
 BLOCK_COOLDOWN = 600   # 10 min pause after captcha detected
+CONTEXT_ROTATE_EVERY = 25  # rotate browser context every N requests
 
 
 class AvitoParser:
@@ -127,7 +145,9 @@ class AvitoParser:
         self._pw = None
         self._context: BrowserContext | None = None
         self._blocked_until: float = 0
-        self._on_blocked = on_blocked  # async callback()
+        self._on_blocked = on_blocked
+        self._request_count: int = 0
+        self._rotate_at: int = random.randint(20, 30)
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -139,7 +159,13 @@ class AvitoParser:
             await self._context.close()
 
         ua = random.choice(USER_AGENTS)
+        webgl_vendor, webgl_renderer = random.choice(_WEBGL_PROFILES)
+        canvas_seed = random.randint(1000, 9999)
+        stealth = _build_stealth_script(webgl_vendor, webgl_renderer, canvas_seed)
+
         chrome_path = CHROME_PATH if Path(CHROME_PATH).exists() else None
+
+        w, h = random.choice([(1366, 768), (1440, 900), (1920, 1080), (1280, 800)])
 
         args = [
             "--disable-blink-features=AutomationControlled",
@@ -151,7 +177,7 @@ class AvitoParser:
             "--disable-session-crashed-bubble",
             "--disable-restore-session-state",
             "--restore-last-session=false",
-            "--window-size=1366,768",
+            f"--window-size={w},{h}",
             "--disable-features=VizDisplayCompositor",
             f"--user-agent={ua}",
         ]
@@ -164,19 +190,20 @@ class AvitoParser:
             user_agent=ua,
             locale="ru-RU",
             timezone_id="Europe/Moscow",
-            viewport={"width": 1366, "height": 768},
+            viewport={"width": w, "height": h},
             extra_http_headers={
                 "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Encoding": "gzip, deflate, br",
             },
         )
-        await self._context.add_init_script(STEALTH_SCRIPT)
+        await self._context.add_init_script(stealth)
 
         for page in self._context.pages[1:]:
             await page.close()
 
-        logger.info("New browser context created")
+        self._rotate_at = self._request_count + random.randint(20, 30)
+        logger.info(f"New browser context: UA={ua[:40]}... WebGL={webgl_vendor}, next rotate at req {self._rotate_at}")
 
     async def stop(self):
         if self._context:
@@ -197,26 +224,43 @@ class AvitoParser:
             or len(html) < 30_000
         )
 
+    @staticmethod
+    async def _human_mouse(page, viewport_w: int, viewport_h: int):
+        for _ in range(random.randint(1, 3)):
+            x = random.randint(100, viewport_w - 100)
+            y = random.randint(100, viewport_h - 200)
+            await page.mouse.move(x, y, steps=random.randint(5, 15))
+            await asyncio.sleep(random.uniform(0.05, 0.2))
+
+    @staticmethod
+    async def _human_scroll(page):
+        scrolls = random.randint(1, 3)
+        for _ in range(scrolls):
+            amount = random.randint(150, 500)
+            await page.evaluate(f"window.scrollBy(0, {amount})")
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+
     async def _get_html(self, url: str, referer: str = "", wait_selector: str = "") -> str:
-        # If we're in cooldown after a block — skip
-        import time
         if time.time() < self._blocked_until:
             wait_sec = int(self._blocked_until - time.time())
             logger.info(f"Cooldown after block, {wait_sec}s left — skipping {url}")
             return ""
+
+        self._request_count += 1
+        if self._request_count >= self._rotate_at:
+            logger.info(f"Rotating browser context after {self._request_count} requests")
+            await self._new_context()
 
         page = await self._context.new_page()
         try:
             if referer:
                 await page.set_extra_http_headers({"Referer": referer})
 
-            await asyncio.sleep(random.uniform(1.5, 3.5))
+            await asyncio.sleep(random.uniform(1.5, 4.0))
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-            # Detect IP block / captcha
             early_html = await page.content()
             if self._is_blocked(early_html):
-                import time
                 self._blocked_until = time.time() + BLOCK_COOLDOWN
                 logger.warning(
                     f"Avito block/captcha detected (html_len={len(early_html)}) — "
@@ -230,14 +274,16 @@ class AvitoParser:
                         pass
                 return ""
 
+            vp = page.viewport_size or {"width": 1366, "height": 768}
+            await self._human_mouse(page, vp["width"], vp["height"])
+
             if wait_selector:
                 try:
                     await page.wait_for_selector(wait_selector, timeout=20000)
                 except Exception:
-                    await page.evaluate("window.scrollBy(0, 300)")
-                    await asyncio.sleep(2)
+                    await self._human_scroll(page)
+                    await asyncio.sleep(random.uniform(1.5, 2.5))
                     try:
-                        # fallback selectors for detail page
                         fallbacks = [
                             '[data-marker="item-view/item-description"]',
                             '[data-marker="seller-info/name"]',
@@ -261,9 +307,8 @@ class AvitoParser:
             else:
                 await asyncio.sleep(random.uniform(1.5, 2.5))
 
-            # Human-like scroll
-            await page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
-            await asyncio.sleep(random.uniform(0.5, 1.0))
+            await self._human_scroll(page)
+            await asyncio.sleep(random.uniform(0.4, 1.0))
 
             return await page.content()
         except Exception as e:
@@ -286,8 +331,7 @@ class AvitoParser:
         from urllib.parse import urlparse, urlunparse
         parsed = urlparse(url)
         clean_url = urlunparse(parsed._replace(query="", fragment=""))
-        await asyncio.sleep(random.uniform(0.5, 1.2))
-        # Try fast selector first (title loads before description)
+        await asyncio.sleep(random.uniform(0.5, 1.5))
         html = await self._get_html(
             clean_url,
             referer="https://www.avito.ru/",
@@ -386,7 +430,6 @@ class AvitoParser:
             result["seller_type"] = seller_type_el.get_text(strip=True)
 
         params = {}
-        # Try old marker first, then new Avito structure
         params_section = soup.find(attrs={"data-marker": "item-view/item-params"})
         if params_section:
             for li in params_section.find_all("li"):
@@ -397,7 +440,6 @@ class AvitoParser:
                     if key and val:
                         params[key] = val
         if not params:
-            # New Avito layout: params are in dl/dt+dd pairs
             for dl in soup.find_all("dl"):
                 dts = dl.find_all("dt")
                 dds = dl.find_all("dd")
@@ -407,7 +449,6 @@ class AvitoParser:
                     if key and val:
                         params[key] = val
         if not params:
-            # Another new layout: params-wrapper with key/value spans
             for section in soup.find_all(class_=lambda c: c and "params" in c.lower()):
                 rows = section.find_all(class_=lambda c: c and "param" in c.lower())
                 for row in rows:

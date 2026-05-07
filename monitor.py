@@ -71,23 +71,36 @@ class Monitor:
 
     async def _loop(self):
         await asyncio.sleep(3)
+        no_result_streak = 0
         while self._running:
             try:
-                await self._tick()
+                found_any = await self._tick()
             except Exception as e:
                 logger.error(f"Monitor tick crashed: {e}", exc_info=True)
-            await asyncio.sleep(random.uniform(10, 35))
+                found_any = False
 
-    async def _tick(self):
+            if found_any:
+                no_result_streak = 0
+                delay = random.uniform(8, 18)
+            else:
+                no_result_streak = min(no_result_streak + 1, 5)
+                base = min(15 * (1.5 ** no_result_streak), 120)
+                delay = random.uniform(base * 0.7, base * 1.3)
+
+            logger.debug(f"Next check in {delay:.1f}s (streak={no_result_streak})")
+            await asyncio.sleep(delay)
+
+    async def _tick(self) -> bool:
         logger.info("Monitor tick")
         watches = await db.get_all_watches()
         await self._ensure_parser(bool(watches))
 
         if not watches:
             logger.info("No watches in DB")
-            return
+            return False
 
         now = asyncio.get_event_loop().time()
+        found_any = False
 
         paid_watches = []
         free_watches = []
@@ -105,9 +118,11 @@ class Monitor:
 
             async def check_paid(watch):
                 async with sem:
-                    await self._check_watch(watch)
+                    return await self._check_watch(watch)
 
-            await asyncio.gather(*[check_paid(w) for w in paid_watches], return_exceptions=True)
+            results = await asyncio.gather(*[check_paid(w) for w in paid_watches], return_exceptions=True)
+            if any(r is True for r in results):
+                found_any = True
 
         if free_watches:
             last = getattr(self, "_last_free_check", 0)
@@ -118,11 +133,15 @@ class Monitor:
 
                 async def check_free(watch):
                     async with sem:
-                        await self._check_watch(watch)
+                        return await self._check_watch(watch)
 
-                await asyncio.gather(*[check_free(w) for w in free_watches], return_exceptions=True)
+                results = await asyncio.gather(*[check_free(w) for w in free_watches], return_exceptions=True)
+                if any(r is True for r in results):
+                    found_any = True
 
-    async def _check_watch(self, watch: dict):
+        return found_any
+
+    async def _check_watch(self, watch: dict) -> bool:
         watch_id = watch["id"]
         user_id = watch["user_id"]
         url = watch["url"]
@@ -131,19 +150,17 @@ class Monitor:
         try:
             listings = await self._parser.fetch_listings(url)
             new_listings = await db.filter_new_listings(watch_id, listings)
-            new_listings = filter_listings(new_listings)  # drop accessories + old
+            new_listings = filter_listings(new_listings)
 
             if not new_listings:
                 logger.debug(f"Watch {watch_id}: no new after pre-filter")
-                return
+                return False
 
-            # Sort by freshness, take only the newest N
             new_listings.sort(key=listing_datetime, reverse=True)
             to_enrich = new_listings[:MAX_DETAIL_FETCH]
 
             logger.info(f"Watch {watch_id}: {len(new_listings)} new → enriching top {len(to_enrich)}")
 
-            # Fetch details in parallel
             sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
 
             async def _enrich(lst):
@@ -155,11 +172,14 @@ class Monitor:
                         return lst
 
             detailed_listings = list(await asyncio.gather(*[_enrich(l) for l in to_enrich]))
-            detailed_listings = filter_after_detail(detailed_listings)  # drop resellers
+            detailed_listings = filter_after_detail(detailed_listings)
 
             for listing in detailed_listings:
                 await send_listing(self.bot, user_id, listing, label)
                 await asyncio.sleep(0.4)
 
+            return bool(detailed_listings)
+
         except Exception as e:
             logger.error(f"Watch {watch_id} error: {e}")
+            return False
