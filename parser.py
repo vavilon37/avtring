@@ -440,6 +440,8 @@ class AvitoParser:
             result["seller_type"] = seller_type_el.get_text(strip=True)
 
         params = {}
+
+        # Method 1: data-marker section (li > span pairs)
         params_section = soup.find(attrs={"data-marker": "item-view/item-params"})
         if params_section:
             for li in params_section.find_all("li"):
@@ -449,25 +451,28 @@ class AvitoParser:
                     val = spans[1].get_text(strip=True)
                     if key and val:
                         params[key] = val
-        if not params:
-            for dl in soup.find_all("dl"):
-                dts = dl.find_all("dt")
-                dds = dl.find_all("dd")
-                for dt, dd in zip(dts, dds):
-                    key = dt.get_text(strip=True).rstrip(":")
-                    val = dd.get_text(strip=True)
-                    if key and val:
+
+        # Method 2: dl/dt+dd pairs — always run to catch condition block
+        for dl in soup.find_all("dl"):
+            dts = dl.find_all("dt")
+            dds = dl.find_all("dd")
+            for dt, dd in zip(dts, dds):
+                key = dt.get_text(strip=True).rstrip(":")
+                val = dd.get_text(strip=True)
+                if key and val and key not in params:
+                    params[key] = val
+
+        # Method 3: class-based params — always run to catch any remaining fields
+        for section in soup.find_all(class_=lambda c: c and "params" in c.lower()):
+            rows = section.find_all(class_=lambda c: c and "param" in c.lower())
+            for row in rows:
+                spans = row.find_all("span")
+                if len(spans) >= 2:
+                    key = spans[0].get_text(strip=True).rstrip(":")
+                    val = spans[-1].get_text(strip=True)
+                    if key and val and key != val and key not in params:
                         params[key] = val
-        if not params:
-            for section in soup.find_all(class_=lambda c: c and "params" in c.lower()):
-                rows = section.find_all(class_=lambda c: c and "param" in c.lower())
-                for row in rows:
-                    spans = row.find_all("span")
-                    if len(spans) >= 2:
-                        key = spans[0].get_text(strip=True).rstrip(":")
-                        val = spans[-1].get_text(strip=True)
-                        if key and val and key != val:
-                            params[key] = val
+
         result["params"] = params
 
         loc_el = soup.find(attrs={"data-marker": "item-view/item-address"})
