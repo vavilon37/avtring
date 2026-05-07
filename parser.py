@@ -409,6 +409,25 @@ class AvitoParser:
             "params": {},
         }
 
+    @staticmethod
+    def _extract_element_value(el) -> str:
+        # 1. Plain text content
+        text = el.get_text(strip=True)
+        if text:
+            return text
+        # 2. Avito condition ratings: value in aria-label, title, or data-* on children
+        for child in el.find_all(True):
+            for attr in ("aria-label", "title", "data-value", "data-rating", "data-label", "content"):
+                v = child.get(attr, "")
+                if v and v.strip():
+                    return v.strip()
+        # 3. Try the element's own attributes
+        for attr in ("aria-label", "title", "data-value", "content"):
+            v = el.get(attr, "")
+            if v and v.strip():
+                return v.strip()
+        return ""
+
     def _parse_detail_html(self, html: str, base: dict) -> dict:
         soup = BeautifulSoup(html, "lxml")
         result = base.copy()
@@ -452,7 +471,7 @@ class AvitoParser:
                 spans = li.find_all("span")
                 if len(spans) >= 2:
                     key = spans[0].get_text(strip=True).rstrip(":")
-                    val = spans[1].get_text(strip=True)
+                    val = self._extract_element_value(spans[1])
                     if key and val:
                         params[key] = val
 
@@ -462,7 +481,7 @@ class AvitoParser:
             dds = dl.find_all("dd")
             for dt, dd in zip(dts, dds):
                 key = dt.get_text(strip=True).rstrip(":")
-                val = dd.get_text(strip=True)
+                val = self._extract_element_value(dd)
                 if key and val and key not in params:
                     params[key] = val
 
@@ -473,7 +492,7 @@ class AvitoParser:
                 spans = row.find_all("span")
                 if len(spans) >= 2:
                     key = spans[0].get_text(strip=True).rstrip(":")
-                    val = spans[-1].get_text(strip=True)
+                    val = self._extract_element_value(spans[-1])
                     if key and val and key != val and key not in params:
                         params[key] = val
 

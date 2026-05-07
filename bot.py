@@ -445,7 +445,8 @@ def _build_listing_text(listing: dict, watch_label: str) -> str:
     if params:
         lines.append("")
         for k, v in list(params.items())[:10]:
-            lines.append(f"▫️ {k}: <b>{v}</b>")
+            if v and str(v).strip():
+                lines.append(f"▫️ {k}: <b>{v}</b>")
 
     desc = (listing.get("description") or "").strip()
     if desc:
