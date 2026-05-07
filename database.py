@@ -190,6 +190,29 @@ async def get_all_watches() -> list[dict]:
             return [dict(r) for r in rows]
 
 
+async def get_stats() -> dict:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as cur:
+            total_users = (await cur.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM users WHERE sub_expires_at > ?", (now_iso,)
+        ) as cur:
+            paid_users = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM watches") as cur:
+            active_watches = (await cur.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM seen_listings WHERE date(seen_at) = date('now')"
+        ) as cur:
+            seen_today = (await cur.fetchone())[0]
+    return {
+        "total_users": total_users,
+        "paid_users": paid_users,
+        "active_watches": active_watches,
+        "seen_today": seen_today,
+    }
+
+
 async def clean_old_seen_listings(days: int = 30):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:

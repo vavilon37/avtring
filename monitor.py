@@ -1,7 +1,11 @@
 import asyncio
 import logging
 import random
+import time
+from datetime import datetime, timezone
 from aiogram import Bot
+from aiogram.filters import Command
+from aiogram.types import Message
 
 import database as db
 from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID
@@ -28,6 +32,10 @@ class Monitor:
         self._empty_params_alerted: bool = False
         self._block_alerted: bool = False
         self._last_cleanup: float = 0
+        self._start_time: float = 0.0
+        self._blocks_today: int = 0
+        self._sent_today: int = 0
+        self._stats_date: str = ""
 
     async def _notify_empty_params(self):
         try:
@@ -44,10 +52,21 @@ class Monitor:
         except Exception as e:
             logger.warning(f"Failed to send empty params notification: {e}")
 
+    async def _notify_recovered(self):
+        try:
+            await self.bot.send_message(
+                chat_id=OWNER_ID,
+                text="✅ <b>Парсер восстановился</b>\n\nАвито снова доступен, мониторинг продолжается.",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send recovery notification: {e}")
+
     async def _notify_blocked(self):
         if self._block_alerted:
             return
         self._block_alerted = True
+        self._blocks_today += 1
         try:
             await self.bot.send_message(
                 chat_id=OWNER_ID,
@@ -65,7 +84,33 @@ class Monitor:
         except Exception as e:
             logger.warning(f"Failed to send block notification: {e}")
 
+    def register_handlers(self, dp):
+        monitor = self
+
+        async def _cmd_stats(msg: Message):
+            if msg.from_user.id != OWNER_ID:
+                return
+            stats = await db.get_stats()
+            uptime_sec = int(time.time() - monitor._start_time)
+            h, rem = divmod(uptime_sec, 3600)
+            m, s = divmod(rem, 60)
+            await msg.answer(
+                "📊 <b>Статистика</b>\n\n"
+                f"👥 Пользователей: <b>{stats['total_users']}</b> "
+                f"(с подпиской: <b>{stats['paid_users']}</b>)\n"
+                f"🔍 Активных поисков: <b>{stats['active_watches']}</b>\n"
+                f"📨 Отправлено сегодня: <b>{monitor._sent_today}</b>\n"
+                f"🔎 Найдено сегодня (включая фильтр): <b>{stats['seen_today']}</b>\n"
+                f"🚫 Блокировок сегодня: <b>{monitor._blocks_today}</b>\n"
+                f"⏱ Аптайм: <b>{h}ч {m}м {s}с</b>",
+                parse_mode="HTML",
+            )
+
+        dp.message.register(_cmd_stats, Command("stats"))
+
     async def start(self):
+        self._start_time = time.time()
+        self._stats_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self._running = True
         self._task = asyncio.create_task(self._loop())
         logger.info("Monitor started")
@@ -102,6 +147,12 @@ class Monitor:
             if now - self._last_cleanup > 86400:
                 self._last_cleanup = now
                 await db.clean_old_seen_listings()
+
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if today != self._stats_date:
+                self._stats_date = today
+                self._blocks_today = 0
+                self._sent_today = 0
 
             try:
                 found_any = await self._tick()
@@ -179,7 +230,10 @@ class Monitor:
 
         try:
             listings = await self._parser.fetch_listings(url)
-            if listings:
+            if listings and self._block_alerted:
+                self._block_alerted = False
+                await self._notify_recovered()
+            elif listings:
                 self._block_alerted = False
             new_listings = await db.filter_new_listings(watch_id, listings)
             new_listings = filter_listings(new_listings)
@@ -218,6 +272,7 @@ class Monitor:
                     self._empty_params_alerted = False
 
                 await send_listing(self.bot, user_id, listing, label)
+                self._sent_today += 1
                 await asyncio.sleep(0.4)
 
             return bool(detailed_listings)

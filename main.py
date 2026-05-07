@@ -30,6 +30,7 @@ async def main():
     bot, dp = make_bot(token, session=session)
     monitor = Monitor(bot=bot)
 
+    monitor.register_handlers(dp)
     await monitor.start()
     logger.info("Bot started. Press Ctrl+C to stop.")
 
