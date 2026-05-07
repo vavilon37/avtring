@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 DB_PATH = "avito_ringer.db"
 
 FREE_MAX_WATCHES = 1
-PAID_MAX_WATCHES = 5
+PAID_MAX_WATCHES = 3
 TRIAL_DAYS = 3
 FREE_INTERVAL = 300   # 5 минут
 PAID_INTERVAL = 15    # 15 секунд
