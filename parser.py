@@ -148,6 +148,7 @@ class AvitoParser:
         self._on_blocked = on_blocked
         self._request_count: int = 0
         self._rotate_at: int = random.randint(20, 30)
+        self._context_lock = asyncio.Lock()
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -258,12 +259,14 @@ class AvitoParser:
             logger.info(f"Cooldown after block, {wait_sec}s left — skipping {url}")
             return ""
 
-        self._request_count += 1
-        if self._request_count >= self._rotate_at:
-            logger.info(f"Rotating browser context after {self._request_count} requests")
-            await self._new_context()
+        async with self._context_lock:
+            self._request_count += 1
+            if self._request_count >= self._rotate_at:
+                logger.info(f"Rotating browser context after {self._request_count} requests")
+                await self._new_context()
+            context = self._context
 
-        page = await self._context.new_page()
+        page = await context.new_page()
         try:
             if referer:
                 await page.set_extra_http_headers({"Referer": referer})
@@ -333,7 +336,6 @@ class AvitoParser:
             await page.close()
 
     async def fetch_listings(self, url: str) -> list[dict]:
-        await asyncio.sleep(random.uniform(1.0, 3.0))
         html = await self._get_html(url, wait_selector='[data-marker="item"]')
         if not html:
             return []
@@ -345,7 +347,6 @@ class AvitoParser:
             return listing
         parsed = urlparse(url)
         clean_url = urlunparse(parsed._replace(query="", fragment=""))
-        await asyncio.sleep(random.uniform(0.5, 1.5))
         html = await self._get_html(
             clean_url,
             referer="https://www.avito.ru/",
@@ -477,27 +478,6 @@ class AvitoParser:
                 val = " ".join(val_parts).strip()
                 if key and val:
                     params[key] = val
-
-        # Method 2: dl/dt+dd pairs — always run to catch condition block
-        for dl in soup.find_all("dl"):
-            dts = dl.find_all("dt")
-            dds = dl.find_all("dd")
-            for dt, dd in zip(dts, dds):
-                key = dt.get_text(strip=True).rstrip(":")
-                val = self._extract_element_value(dd)
-                if key and val and key not in params:
-                    params[key] = val
-
-        # Method 3: class-based params — always run to catch any remaining fields
-        for section in soup.find_all(class_=lambda c: c and "params" in c.lower()):
-            rows = section.find_all(class_=lambda c: c and "param" in c.lower())
-            for row in rows:
-                spans = row.find_all("span")
-                if len(spans) >= 2:
-                    key = spans[0].get_text(strip=True).rstrip(":")
-                    val = self._extract_element_value(spans[-1])
-                    if key and val and key != val and key not in params:
-                        params[key] = val
 
         result["params"] = params
 

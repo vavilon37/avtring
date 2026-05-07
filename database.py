@@ -18,6 +18,8 @@ OWNER_IDS = {OWNER_ID}
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS watches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

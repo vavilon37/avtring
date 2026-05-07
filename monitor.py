@@ -79,7 +79,10 @@ class Monitor:
             except asyncio.CancelledError:
                 pass
         if self._parser_started:
-            await self._parser.stop()
+            try:
+                await asyncio.wait_for(self._parser.stop(), timeout=15)
+            except asyncio.TimeoutError:
+                logger.warning("Parser did not stop within 15s — forcing exit")
             self._parser_started = False
         logger.info("Monitor stopped")
 

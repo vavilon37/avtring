@@ -27,7 +27,6 @@ async def main():
     await init_db()
 
     session = AiohttpSession()
-    session._connector_init["ssl"] = False
     bot, dp = make_bot(token, session=session)
     monitor = Monitor(bot=bot)
 
