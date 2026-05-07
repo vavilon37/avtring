@@ -1,6 +1,6 @@
 import aiosqlite
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 DB_PATH = "avito_ringer.db"
@@ -10,6 +10,10 @@ PAID_MAX_WATCHES = 3
 TRIAL_DAYS = 3
 FREE_INTERVAL = 300   # 5 минут
 PAID_INTERVAL = 15    # 15 секунд
+SUBSCRIPTION_DAYS = 5
+
+OWNER_ID = 8501271486  # @yodealer
+OWNER_IDS = {OWNER_ID}
 
 
 async def init_db():
@@ -45,6 +49,9 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_seen_watch ON seen_listings(watch_id)"
+        )
         await db.commit()
     logger.info("Database initialized")
 
@@ -89,32 +96,26 @@ async def is_trial_active(user_id: int) -> bool:
     return delta.days < TRIAL_DAYS
 
 
-OWNER_IDS = {8501271486}  # @yodealer — always paid
-
 async def get_user_plan(user_id: int) -> str:
     """Returns 'paid', 'trial', or 'free'"""
     if user_id in OWNER_IDS:
         return "paid"
     if await is_subscribed(user_id):
         return "paid"
+    if await is_trial_active(user_id):
+        return "trial"
     return "free"
 
 
-async def activate_subscription(user_id: int, days: int = 7):
+async def activate_subscription(user_id: int, days: int = SUBSCRIPTION_DAYS):
     now = datetime.now(timezone.utc)
     user = await get_user(user_id)
     if user and user["sub_expires_at"]:
         current = datetime.fromisoformat(user["sub_expires_at"])
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
-        if current > now:
-            from datetime import timedelta
-            expires = current + timedelta(days=days)
-        else:
-            from datetime import timedelta
-            expires = now + timedelta(days=days)
+        expires = (current if current > now else now) + timedelta(days=days)
     else:
-        from datetime import timedelta
         expires = now + timedelta(days=days)
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -185,6 +186,17 @@ async def get_all_watches() -> list[dict]:
         async with db.execute("SELECT * FROM watches") as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+async def clean_old_seen_listings(days: int = 30):
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM seen_listings WHERE seen_at < ?", (cutoff,)
+        )
+        await db.commit()
+        if cursor.rowcount:
+            logger.info(f"Cleaned {cursor.rowcount} old seen_listings entries")
 
 
 async def filter_new_listings(watch_id: int, listings: list[dict]) -> list[dict]:

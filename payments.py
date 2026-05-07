@@ -2,11 +2,12 @@ import os
 import logging
 import httpx
 
+from database import SUBSCRIPTION_DAYS
+
 logger = logging.getLogger(__name__)
 
 CRYPTO_BOT_API = "https://pay.crypt.bot/api"
 PRICE_RUB = 545
-SUBSCRIPTION_DAYS = 5
 
 
 def _token() -> str:
@@ -24,7 +25,7 @@ async def create_invoice(user_id: int) -> dict | None:
                     "currency_type": "fiat",
                     "fiat": "RUB",
                     "amount": str(PRICE_RUB),
-                    "description": f"Avito Ringer — подписка на 5 дней",
+                    "description": f"Avito Ringer — подписка на {SUBSCRIPTION_DAYS} дней",
                     "payload": str(user_id),
                     "paid_btn_name": "callback",
                     "paid_btn_url": "https://t.me/avtring_bot",

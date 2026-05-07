@@ -4,7 +4,7 @@ import logging
 import time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from playwright.async_api import async_playwright, BrowserContext
 
 logger = logging.getLogger(__name__)
@@ -432,8 +432,6 @@ class AvitoParser:
         soup = BeautifulSoup(html, "lxml")
         result = base.copy()
 
-        Path("last_detail_page.html").write_text(html, encoding="utf-8")
-
         images = []
         gallery = soup.find("div", attrs={"data-marker": "image-frame/image-wrapper"})
         if not gallery:
@@ -467,7 +465,6 @@ class AvitoParser:
         # Method 1: data-marker section
         # Avito structure: <span class="d6e8fd2e...">KEY[<span>: </span>][<img>]</span>VALUE_TEXT
         # Value is a NavigableString after the key span, NOT inside a span
-        from bs4 import NavigableString
         params_section = soup.find(attrs={"data-marker": "item-view/item-params"})
         if params_section:
             for li in params_section.find_all("li"):

@@ -13,7 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import database as db
-from database import FREE_MAX_WATCHES, PAID_MAX_WATCHES
+from database import FREE_MAX_WATCHES, PAID_MAX_WATCHES, OWNER_ID, OWNER_IDS
 from filters import (
     PHONE_MODELS, CONDITIONS, SELLER_TYPES, CITIES,
     build_avito_url, label_from_filters,
@@ -21,8 +21,6 @@ from filters import (
 from payments import create_invoice, check_invoice, PRICE_RUB, SUBSCRIPTION_DAYS
 
 logger = logging.getLogger(__name__)
-
-OWNER_IDS = {8501271486}  # @yodealer — бесплатный доступ всегда
 
 BTN_ADD  = "➕ Добавить поиск"
 BTN_LIST = "📋 Мои поиски"
@@ -147,8 +145,6 @@ async def _plan_text(user_id: int) -> str:
     else:
         return "🔒 <b>Нет подписки</b>"
 
-
-OWNER_ID = 8501271486  # @yodealer — unlimited watches
 
 async def _max_watches(user_id: int) -> int:
     if user_id == OWNER_ID:

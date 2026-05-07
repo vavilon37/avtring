@@ -4,7 +4,7 @@ import random
 from aiogram import Bot
 
 import database as db
-from database import FREE_INTERVAL, PAID_INTERVAL
+from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID
 from parser import AvitoParser, BLOCK_COOLDOWNS
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime
@@ -13,9 +13,6 @@ MAX_DETAIL_FETCH = 10   # max detail pages per cycle
 DETAIL_CONCURRENCY = 2  # simultaneous browser tabs for detail pages
 
 logger = logging.getLogger(__name__)
-
-
-OWNER_ID = 8501271486  # @yodealer
 
 
 EMPTY_PARAMS_THRESHOLD = 5  # alert after this many consecutive listings with no params
@@ -29,6 +26,8 @@ class Monitor:
         self._task: asyncio.Task | None = None
         self._empty_params_streak: int = 0
         self._empty_params_alerted: bool = False
+        self._block_alerted: bool = False
+        self._last_cleanup: float = 0
 
     async def _notify_empty_params(self):
         try:
@@ -46,6 +45,9 @@ class Monitor:
             logger.warning(f"Failed to send empty params notification: {e}")
 
     async def _notify_blocked(self):
+        if self._block_alerted:
+            return
+        self._block_alerted = True
         try:
             await self.bot.send_message(
                 chat_id=OWNER_ID,
@@ -93,6 +95,11 @@ class Monitor:
         await asyncio.sleep(3)
         no_result_streak = 0
         while self._running:
+            now = asyncio.get_event_loop().time()
+            if now - self._last_cleanup > 86400:
+                self._last_cleanup = now
+                await db.clean_old_seen_listings()
+
             try:
                 found_any = await self._tick()
             except Exception as e:
@@ -169,6 +176,8 @@ class Monitor:
 
         try:
             listings = await self._parser.fetch_listings(url)
+            if listings:
+                self._block_alerted = False
             new_listings = await db.filter_new_listings(watch_id, listings)
             new_listings = filter_listings(new_listings)
 

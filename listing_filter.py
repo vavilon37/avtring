@@ -118,10 +118,10 @@ def _reseller_score(listing: dict) -> tuple[bool, str]:
     if _STORE_SELLER_TYPES.search(seller_type):
         return True, f"seller_type={seller_type!r}"
 
-    # 2. Any emoji in description
-    if _EMOJI_RE.search(desc):
-        count = len(_EMOJI_RE.findall(desc))
-        return True, f"emoji in desc ({count})"
+    # 2. Many emojis in description — single emoji is fine for private sellers
+    emoji_count = len(_EMOJI_RE.findall(desc))
+    if emoji_count >= 3:
+        return True, f"emoji in desc ({emoji_count})"
 
     # 3. Store phrases in description
     m = _DESC_STORE_PHRASES.search(desc)
