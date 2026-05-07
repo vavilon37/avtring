@@ -76,8 +76,7 @@ class Monitor:
                 await self._tick()
             except Exception as e:
                 logger.error(f"Monitor tick crashed: {e}", exc_info=True)
-            jitter = random.uniform(-3, 3)
-            await asyncio.sleep(max(5, PAID_INTERVAL + jitter))
+            await asyncio.sleep(random.uniform(10, 35))
 
     async def _tick(self):
         logger.info("Monitor tick")
