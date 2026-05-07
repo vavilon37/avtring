@@ -153,6 +153,7 @@ class AvitoParser:
         self._rotate_at: int = random.randint(25, 40)
         self._context_lock = asyncio.Lock()
         self._profile_idx: int = random.randint(0, len(PROFILE_DIRS) - 1)
+        self._needs_warmup: bool = False
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -258,6 +259,36 @@ class AvitoParser:
             await asyncio.sleep(random.uniform(0.08, 0.25))
             cx, cy = tx, ty
 
+    _WARMUP_PAGES = [
+        "https://www.avito.ru/all/elektronika",
+        "https://www.avito.ru/all/telefony",
+        "https://www.avito.ru/all/bytovaya_elektronika",
+        "https://www.avito.ru/all/igry_pristavki_i_programmy",
+        "https://www.avito.ru/all/noutbuki",
+    ]
+
+    async def _warmup(self):
+        """Browse avito naturally with the fresh profile before real requests."""
+        context = self._context
+        pages_to_visit = ["https://www.avito.ru/"] + [random.choice(self._WARMUP_PAGES)]
+        logger.info(f"Warming up new profile ({len(pages_to_visit)} pages)...")
+        for i, url in enumerate(pages_to_visit):
+            page = await context.new_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(random.uniform(2.5, 5.0))
+                vp = page.viewport_size or {"width": 1366, "height": 768}
+                await self._human_scroll(page)
+                await self._human_mouse(page, vp["width"], vp["height"])
+                await asyncio.sleep(random.uniform(2.0, 4.5))
+            except Exception as e:
+                logger.debug(f"Warmup page error ({url}): {e}")
+            finally:
+                await page.close()
+            if i < len(pages_to_visit) - 1:
+                await asyncio.sleep(random.uniform(3.0, 7.0))
+        logger.info("Warmup complete — starting real requests")
+
     @staticmethod
     async def _human_scroll(page):
         # Use real wheel events — not detectable as scripted JS
@@ -271,6 +302,13 @@ class AvitoParser:
             wait_sec = int(self._blocked_until - time.time())
             logger.info(f"Cooldown after block, {wait_sec}s left — skipping {url}")
             return ""
+
+        if self._needs_warmup:
+            self._needs_warmup = False
+            try:
+                await self._warmup()
+            except Exception as e:
+                logger.warning(f"Warmup failed: {e}")
 
         async with self._context_lock:
             self._request_count += 1
@@ -297,9 +335,10 @@ class AvitoParser:
                     f"attempt {self._block_count}, pausing {cooldown//60} min."
                 )
                 Path("last_failed_page.html").write_text(early_html, encoding="utf-8")
-                # Switch to a fresh profile immediately after block
+                # Switch to a fresh profile and schedule warmup for next request
                 async with self._context_lock:
                     await self._new_context()
+                self._needs_warmup = True
                 if self._on_blocked:
                     try:
                         await self._on_blocked()
