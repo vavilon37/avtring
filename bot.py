@@ -148,7 +148,11 @@ async def _plan_text(user_id: int) -> str:
         return "🔒 <b>Нет подписки</b>"
 
 
+OWNER_ID = 8501271486  # @yodealer — unlimited watches
+
 async def _max_watches(user_id: int) -> int:
+    if user_id == OWNER_ID:
+        return 999
     plan = await db.get_user_plan(user_id)
     return PAID_MAX_WATCHES if plan == "paid" else FREE_MAX_WATCHES
 
