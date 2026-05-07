@@ -185,7 +185,6 @@ class Monitor:
 
         paid_watches = []
         free_watches = []
-
         for watch in watches:
             plan = await db.get_user_plan(watch["user_id"])
             if plan in ("paid", "trial"):
@@ -194,40 +193,39 @@ class Monitor:
                 free_watches.append(watch)
 
         if paid_watches:
-            logger.info(f"Checking {len(paid_watches)} paid watches")
-            sem = asyncio.Semaphore(3)
-
-            async def check_paid(watch):
-                async with sem:
-                    return await self._check_watch(watch)
-
-            results = await asyncio.gather(*[check_paid(w) for w in paid_watches], return_exceptions=True)
-            if any(r is True for r in results):
-                found_any = True
+            url_groups: dict[str, list] = {}
+            for w in paid_watches:
+                url_groups.setdefault(w["url"], []).append(w)
+            logger.info(
+                f"Checking {len(paid_watches)} paid watches "
+                f"→ {len(url_groups)} unique URLs"
+            )
+            for i, (url, watchers) in enumerate(url_groups.items()):
+                if i > 0:
+                    await asyncio.sleep(random.uniform(2.0, 5.0))
+                if await self._check_url_group(url, watchers):
+                    found_any = True
 
         if free_watches:
             last = getattr(self, "_last_free_check", 0)
             if now - last >= FREE_INTERVAL:
                 self._last_free_check = now
-                logger.info(f"Checking {len(free_watches)} free watches")
-                sem = asyncio.Semaphore(2)
-
-                async def check_free(watch):
-                    async with sem:
-                        return await self._check_watch(watch)
-
-                results = await asyncio.gather(*[check_free(w) for w in free_watches], return_exceptions=True)
-                if any(r is True for r in results):
-                    found_any = True
+                url_groups = {}
+                for w in free_watches:
+                    url_groups.setdefault(w["url"], []).append(w)
+                logger.info(
+                    f"Checking {len(free_watches)} free watches "
+                    f"→ {len(url_groups)} unique URLs"
+                )
+                for i, (url, watchers) in enumerate(url_groups.items()):
+                    if i > 0:
+                        await asyncio.sleep(random.uniform(2.0, 5.0))
+                    if await self._check_url_group(url, watchers):
+                        found_any = True
 
         return found_any
 
-    async def _check_watch(self, watch: dict) -> bool:
-        watch_id = watch["id"]
-        user_id = watch["user_id"]
-        url = watch["url"]
-        label = watch["label"] or f"Поиск #{watch_id}"
-
+    async def _check_url_group(self, url: str, watchers: list[dict]) -> bool:
         try:
             listings = await self._parser.fetch_listings(url)
             if listings and self._block_alerted:
@@ -235,18 +233,32 @@ class Monitor:
                 await self._notify_recovered()
             elif listings:
                 self._block_alerted = False
-            new_listings = await db.filter_new_listings(watch_id, listings)
-            new_listings = filter_listings(new_listings)
 
-            if not new_listings:
-                logger.debug(f"Watch {watch_id}: no new after pre-filter")
+            if not listings:
                 return False
 
-            new_listings.sort(key=listing_datetime, reverse=True)
-            to_enrich = new_listings[:MAX_DETAIL_FETCH]
+            # Per-watch: find new listings and pre-filter; deduplicate for detail fetch
+            per_watch: dict[int, list[dict]] = {}
+            to_enrich: dict[str, dict] = {}  # listing_id -> listing (unique across watches)
 
-            logger.info(f"Watch {watch_id}: {len(new_listings)} new → enriching top {len(to_enrich)}")
+            for watch in watchers:
+                new = await db.filter_new_listings(watch["id"], listings)
+                new = filter_listings(new)
+                new.sort(key=listing_datetime, reverse=True)
+                top = new[:MAX_DETAIL_FETCH]
+                per_watch[watch["id"]] = top
+                for lst in top:
+                    to_enrich.setdefault(lst["id"], lst)
 
+            if not to_enrich:
+                return False
+
+            logger.info(
+                f"URL group ({len(watchers)} watchers): "
+                f"{len(to_enrich)} unique listings to enrich"
+            )
+
+            # Fetch each detail page once, even if multiple watchers need it
             sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
 
             async def _enrich(lst):
@@ -257,26 +269,37 @@ class Monitor:
                         logger.warning(f"Detail fetch failed {lst.get('id')}: {e}")
                         return lst
 
-            detailed_listings = list(await asyncio.gather(*[_enrich(l) for l in to_enrich]))
-            detailed_listings = filter_after_detail(detailed_listings)
+            detailed = await asyncio.gather(*[_enrich(l) for l in to_enrich.values()])
+            detailed_by_id = {l["id"]: l for l in detailed}
 
-            for listing in detailed_listings:
-                # Track empty params streak to detect Avito HTML changes
-                if not listing.get("params"):
-                    self._empty_params_streak += 1
-                    if self._empty_params_streak >= EMPTY_PARAMS_THRESHOLD and not self._empty_params_alerted:
-                        self._empty_params_alerted = True
-                        await self._notify_empty_params()
-                else:
-                    self._empty_params_streak = 0
-                    self._empty_params_alerted = False
+            found_any = False
+            for watch in watchers:
+                label = watch["label"] or f"Поиск #{watch['id']}"
+                watch_listings = [
+                    detailed_by_id.get(l["id"], l) for l in per_watch[watch["id"]]
+                ]
+                watch_listings = filter_after_detail(watch_listings)
 
-                await send_listing(self.bot, user_id, listing, label)
-                self._sent_today += 1
-                await asyncio.sleep(0.4)
+                for listing in watch_listings:
+                    if not listing.get("params"):
+                        self._empty_params_streak += 1
+                        if (self._empty_params_streak >= EMPTY_PARAMS_THRESHOLD
+                                and not self._empty_params_alerted):
+                            self._empty_params_alerted = True
+                            await self._notify_empty_params()
+                    else:
+                        self._empty_params_streak = 0
+                        self._empty_params_alerted = False
 
-            return bool(detailed_listings)
+                    await send_listing(self.bot, watch["user_id"], listing, label)
+                    self._sent_today += 1
+                    await asyncio.sleep(0.4)
+
+                if watch_listings:
+                    found_any = True
+
+            return found_any
 
         except Exception as e:
-            logger.error(f"Watch {watch_id} error: {e}")
+            logger.error(f"URL group error ({url[:60]}): {e}")
             return False
