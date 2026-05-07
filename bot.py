@@ -179,7 +179,7 @@ async def _cmd_help(msg: Message):
         "4. При новом объявлении — сразу пришлю карточку с фото, "
         "характеристиками, описанием и ценой\n\n"
         "<b>Подписка:</b>\n"
-        f"💎 {PRICE_RUB}₽/нед — 3 поисков, проверка каждые 15 сек\n\n"
+        f"💎 {PRICE_RUB}₽/{SUBSCRIPTION_DAYS} дней — до {PAID_MAX_WATCHES} поисков, проверка каждые 15 сек\n\n"
         "Удалить поиск — <b>🗑 Удалить поиск</b>.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
@@ -248,7 +248,7 @@ async def _cmd_add(msg: Message, state: FSMContext):
     if plan == "free":
         await msg.answer(
             f"🔒 <b>Доступно только по подписке</b>\n\n"
-            f"Оформи подписку 💎 за {PRICE_RUB}₽/нед — получишь до 3 поисков и проверку каждые 15 сек.",
+            f"Оформи подписку 💎 за {PRICE_RUB}₽/{SUBSCRIPTION_DAYS} дней — до {PAID_MAX_WATCHES} поисков, проверка каждые 15 сек.",
             parse_mode="HTML",
             reply_markup=_main_menu(),
         )
