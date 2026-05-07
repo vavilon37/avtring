@@ -10,6 +10,9 @@ from playwright.async_api import async_playwright, BrowserContext
 logger = logging.getLogger(__name__)
 
 PROFILE_DIR = str(Path(__file__).parent / "chrome_profile")
+PROFILE_DIRS = [
+    str(Path(__file__).parent / f"chrome_profile_{i}") for i in range(3)
+]
 CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 USER_AGENTS = [
@@ -147,8 +150,9 @@ class AvitoParser:
         self._block_count: int = 0
         self._on_blocked = on_blocked
         self._request_count: int = 0
-        self._rotate_at: int = random.randint(20, 30)
+        self._rotate_at: int = random.randint(25, 40)
         self._context_lock = asyncio.Lock()
+        self._profile_idx: int = random.randint(0, len(PROFILE_DIRS) - 1)
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -158,6 +162,9 @@ class AvitoParser:
     async def _new_context(self):
         if self._context:
             await self._context.close()
+
+        profile = PROFILE_DIRS[self._profile_idx % len(PROFILE_DIRS)]
+        self._profile_idx += 1
 
         ua = random.choice(USER_AGENTS)
         webgl_vendor, webgl_renderer = random.choice(_WEBGL_PROFILES)
@@ -184,7 +191,7 @@ class AvitoParser:
         ]
 
         self._context = await self._pw.chromium.launch_persistent_context(
-            user_data_dir=PROFILE_DIR,
+            user_data_dir=profile,
             executable_path=chrome_path,
             headless=True,
             args=args,
@@ -203,8 +210,11 @@ class AvitoParser:
         for page in self._context.pages[1:]:
             await page.close()
 
-        self._rotate_at = self._request_count + random.randint(20, 30)
-        logger.info(f"New browser context: UA={ua[:40]}... WebGL={webgl_vendor}, next rotate at req {self._rotate_at}")
+        self._rotate_at = self._request_count + random.randint(25, 40)
+        logger.info(
+            f"New browser context: profile={Path(profile).name}, "
+            f"UA={ua[:40]}... WebGL={webgl_vendor}, next rotate at req {self._rotate_at}"
+        )
 
     async def stop(self):
         if self._context:
@@ -215,15 +225,18 @@ class AvitoParser:
 
     @staticmethod
     def _is_blocked(html: str) -> bool:
-        if len(html) > 100_000:
+        if len(html) > 80_000:
             return False
         lower = html.lower()
-        return (
+        if (
             "доступ ограничен" in lower
             or 'class="firewall' in lower
+            or "access denied" in lower
             or ("captcha" in lower and len(html) < 50_000)
-            or len(html) < 30_000
-        )
+            or ("robot" in lower and len(html) < 15_000)
+        ):
+            return True
+        return len(html) < 8_000
 
     @staticmethod
     async def _human_mouse(page, viewport_w: int, viewport_h: int):
@@ -284,6 +297,9 @@ class AvitoParser:
                     f"attempt {self._block_count}, pausing {cooldown//60} min."
                 )
                 Path("last_failed_page.html").write_text(early_html, encoding="utf-8")
+                # Switch to a fresh profile immediately after block
+                async with self._context_lock:
+                    await self._new_context()
                 if self._on_blocked:
                     try:
                         await self._on_blocked()

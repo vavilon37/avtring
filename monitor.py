@@ -13,8 +13,9 @@ from parser import AvitoParser, BLOCK_COOLDOWNS
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime
 
-MAX_DETAIL_FETCH = 10   # max detail pages per cycle
-DETAIL_CONCURRENCY = 2  # simultaneous browser tabs for detail pages
+MAX_DETAIL_FETCH = 3    # max detail pages per cycle
+DETAIL_CONCURRENCY = 1  # sequential detail fetches — less suspicious
+MIN_PAID_URL_INTERVAL = 60.0  # seconds between re-checks of the same URL
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class Monitor:
         self._sent_today: int = 0
         self._stats_date: str = ""
         self._tick_sent: dict[int, set] = {}  # user_id -> listing_ids sent this tick
+        self._url_last_checked: dict[str, float] = {}  # url -> last check timestamp
 
     async def _notify_empty_params(self):
         try:
@@ -214,9 +216,16 @@ class Monitor:
                 f"Checking {len(paid_watches)} paid watches "
                 f"→ {len(url_groups)} unique URLs"
             )
-            for i, (url, watchers) in enumerate(url_groups.items()):
-                if i > 0:
-                    await asyncio.sleep(random.uniform(2.0, 5.0))
+            processed = 0
+            for url, watchers in url_groups.items():
+                last_checked = self._url_last_checked.get(url, 0)
+                if now - last_checked < MIN_PAID_URL_INTERVAL:
+                    logger.debug(f"Skip {url[:50]} — checked {now - last_checked:.0f}s ago")
+                    continue
+                if processed > 0:
+                    await asyncio.sleep(random.uniform(8.0, 20.0))
+                self._url_last_checked[url] = now
+                processed += 1
                 if await self._check_url_group(url, watchers):
                     found_any = True
 
@@ -231,9 +240,11 @@ class Monitor:
                     f"Checking {len(free_watches)} free watches "
                     f"→ {len(url_groups)} unique URLs"
                 )
-                for i, (url, watchers) in enumerate(url_groups.items()):
-                    if i > 0:
-                        await asyncio.sleep(random.uniform(2.0, 5.0))
+                processed = 0
+                for url, watchers in url_groups.items():
+                    if processed > 0:
+                        await asyncio.sleep(random.uniform(8.0, 20.0))
+                    processed += 1
                     if await self._check_url_group(url, watchers):
                         found_any = True
 
@@ -277,6 +288,7 @@ class Monitor:
 
             async def _enrich(lst):
                 async with sem:
+                    await asyncio.sleep(random.uniform(4.0, 9.0))
                     try:
                         return await self._parser.fetch_listing_detail(lst)
                     except Exception as e:
