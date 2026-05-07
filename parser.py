@@ -3,6 +3,7 @@ import random
 import logging
 import time
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, BrowserContext
 
@@ -16,8 +17,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
 ]
 
 # Windows-appropriate GPU profiles to match Windows UA
@@ -137,7 +137,6 @@ if (window.AudioContext || window.webkitAudioContext) {{
 
 
 BLOCK_COOLDOWN = 600   # 10 min pause after captcha detected
-CONTEXT_ROTATE_EVERY = 25  # rotate browser context every N requests
 
 
 class AvitoParser:
@@ -226,19 +225,31 @@ class AvitoParser:
 
     @staticmethod
     async def _human_mouse(page, viewport_w: int, viewport_h: int):
-        for _ in range(random.randint(1, 3)):
-            x = random.randint(100, viewport_w - 100)
-            y = random.randint(100, viewport_h - 200)
-            await page.mouse.move(x, y, steps=random.randint(5, 15))
-            await asyncio.sleep(random.uniform(0.05, 0.2))
+        # Start from center area (where mouse would realistically be)
+        cx = viewport_w // 2 + random.randint(-80, 80)
+        cy = viewport_h // 2 + random.randint(-60, 60)
+        await page.mouse.move(cx, cy, steps=random.randint(3, 7))
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+
+        for _ in range(random.randint(2, 4)):
+            tx = random.randint(120, viewport_w - 120)
+            ty = random.randint(80, viewport_h - 150)
+            # Curved path: move through a midpoint offset from the straight line
+            mx = (cx + tx) // 2 + random.randint(-100, 100)
+            my = (cy + ty) // 2 + random.randint(-60, 60)
+            await page.mouse.move(mx, my, steps=random.randint(4, 10))
+            await asyncio.sleep(random.uniform(0.03, 0.12))
+            await page.mouse.move(tx, ty, steps=random.randint(4, 10))
+            await asyncio.sleep(random.uniform(0.08, 0.25))
+            cx, cy = tx, ty
 
     @staticmethod
     async def _human_scroll(page):
-        scrolls = random.randint(1, 3)
-        for _ in range(scrolls):
-            amount = random.randint(150, 500)
-            await page.evaluate(f"window.scrollBy(0, {amount})")
-            await asyncio.sleep(random.uniform(0.3, 0.8))
+        # Use real wheel events — not detectable as scripted JS
+        for _ in range(random.randint(2, 5)):
+            delta = random.randint(80, 300)
+            await page.mouse.wheel(0, delta)
+            await asyncio.sleep(random.uniform(0.2, 0.6))
 
     async def _get_html(self, url: str, referer: str = "", wait_selector: str = "") -> str:
         if time.time() < self._blocked_until:
@@ -275,13 +286,11 @@ class AvitoParser:
                 return ""
 
             vp = page.viewport_size or {"width": 1366, "height": 768}
-            await self._human_mouse(page, vp["width"], vp["height"])
 
             if wait_selector:
                 try:
                     await page.wait_for_selector(wait_selector, timeout=20000)
                 except Exception:
-                    await self._human_scroll(page)
                     await asyncio.sleep(random.uniform(1.5, 2.5))
                     try:
                         fallbacks = [
@@ -307,6 +316,8 @@ class AvitoParser:
             else:
                 await asyncio.sleep(random.uniform(1.5, 2.5))
 
+            # Human behaviour after content is loaded
+            await self._human_mouse(page, vp["width"], vp["height"])
             await self._human_scroll(page)
             await asyncio.sleep(random.uniform(0.4, 1.0))
 
@@ -328,7 +339,6 @@ class AvitoParser:
         url = listing["link"]
         if not url:
             return listing
-        from urllib.parse import urlparse, urlunparse
         parsed = urlparse(url)
         clean_url = urlunparse(parsed._replace(query="", fragment=""))
         await asyncio.sleep(random.uniform(0.5, 1.5))
