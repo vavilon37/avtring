@@ -7,7 +7,7 @@ DB_PATH = "avito_ringer.db"
 
 FREE_MAX_WATCHES = 1
 PAID_MAX_WATCHES = 3
-TRIAL_DAYS = 3
+TRIAL_DAYS = 1
 FREE_INTERVAL = 300   # 5 минут
 PAID_INTERVAL = 15    # 15 секунд
 SUBSCRIPTION_DAYS = 5
@@ -54,17 +54,24 @@ async def init_db():
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_seen_watch ON seen_listings(watch_id)"
         )
+        # Migration: add referred_by column if missing
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        except Exception:
+            pass
         await db.commit()
     logger.info("Database initialized")
 
 
-async def ensure_user(user_id: int):
+async def ensure_user(user_id: int) -> bool:
+    """Returns True if user was just created (first start)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+        cursor = await db.execute(
             "INSERT OR IGNORE INTO users (user_id, trial_started_at) VALUES (?, ?)",
             (user_id, datetime.now(timezone.utc).isoformat()),
         )
         await db.commit()
+        return cursor.rowcount > 0
 
 
 async def get_user(user_id: int) -> dict | None:
@@ -222,6 +229,37 @@ async def clean_old_seen_listings(days: int = 30):
         await db.commit()
         if cursor.rowcount:
             logger.info(f"Cleaned {cursor.rowcount} old seen_listings entries")
+
+
+async def apply_referral(new_user_id: int, referrer_id: int) -> bool:
+    """
+    Links new_user to referrer and gives referrer +1 day of paid access.
+    Returns True if referral was applied (only once per user).
+    """
+    if new_user_id == referrer_id:
+        return False
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT referred_by FROM users WHERE user_id = ?", (new_user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row or row[0] is not None:
+            return False  # user doesn't exist or was already referred
+        await db.execute(
+            "UPDATE users SET referred_by = ? WHERE user_id = ?",
+            (referrer_id, new_user_id),
+        )
+        await db.commit()
+    await activate_subscription(referrer_id, days=1)
+    return True
+
+
+async def get_referral_count(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,)
+        ) as cur:
+            return (await cur.fetchone())[0]
 
 
 async def filter_new_listings(watch_id: int, listings: list[dict]) -> list[dict]:
