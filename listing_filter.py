@@ -153,13 +153,10 @@ def is_accessory(listing: dict) -> bool:
     return bool(_ACCESSORY_RE.search(listing.get("title", "")))
 
 
-def is_too_old(listing: dict, max_age_minutes: int = 120) -> bool:
+def is_too_old(listing: dict, max_age_minutes: int = 180) -> bool:
     date_str = listing.get("date", "")
     if not date_str:
         return False
-    s = date_str.strip().lower()
-    if "вчера" in s:
-        return True
     dt = _parse_avito_date(date_str)
     if dt is None:
         return False  # не можем определить возраст — пропускаем дальше
