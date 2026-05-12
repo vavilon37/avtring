@@ -38,6 +38,44 @@ PHONE_MODELS = {
     "Любой телефон": "",
 }
 
+# Нативные Авито-слаги для iPhone-моделей: query_key -> (brand_slug, model_slug)
+_MODEL_SLUGS: dict[str, tuple[str, str]] = {
+    "iPhone+17+Pro+Max": ("apple", "iphone_17_pro_max"),
+    "iPhone+17+Pro":     ("apple", "iphone_17_pro"),
+    "iPhone+17+Plus":    ("apple", "iphone_17_plus"),
+    "iPhone+17":         ("apple", "iphone_17"),
+    "iPhone+16+Pro+Max": ("apple", "iphone_16_pro_max"),
+    "iPhone+16+Pro":     ("apple", "iphone_16_pro"),
+    "iPhone+16+Plus":    ("apple", "iphone_16_plus"),
+    "iPhone+16+mini":    ("apple", "iphone_16_mini"),
+    "iPhone+16":         ("apple", "iphone_16"),
+    "iPhone+15+Pro+Max": ("apple", "iphone_15_pro_max"),
+    "iPhone+15+Pro":     ("apple", "iphone_15_pro"),
+    "iPhone+15+Plus":    ("apple", "iphone_15_plus"),
+    "iPhone+15":         ("apple", "iphone_15"),
+    "iPhone+14+Pro+Max": ("apple", "iphone_14_pro_max"),
+    "iPhone+14+Pro":     ("apple", "iphone_14_pro"),
+    "iPhone+14+Plus":    ("apple", "iphone_14_plus"),
+    "iPhone+14":         ("apple", "iphone_14"),
+    "iPhone+13+Pro+Max": ("apple", "iphone_13_pro_max"),
+    "iPhone+13+Pro":     ("apple", "iphone_13_pro"),
+    "iPhone+13+mini":    ("apple", "iphone_13_mini"),
+    "iPhone+13":         ("apple", "iphone_13"),
+    "iPhone+12+Pro+Max": ("apple", "iphone_12_pro_max"),
+    "iPhone+12+Pro":     ("apple", "iphone_12_pro"),
+    "iPhone+12+mini":    ("apple", "iphone_12_mini"),
+    "iPhone+12":         ("apple", "iphone_12"),
+}
+
+# Авито-слаги для объёма памяти
+_STORAGE_SLUGS: dict[int, str] = {
+    64:   "64_gb",
+    128:  "128_gb",
+    256:  "256_gb",
+    512:  "512_gb",
+    1000: "1_tb",
+}
+
 # Состояние
 CONDITIONS = {
     "Новый": "1",
@@ -85,15 +123,10 @@ def build_avito_url(filters: dict) -> str:
     seller_type = filters.get("seller_type", "")
     storage_gb = filters.get("storage_gb", 0)
 
-    q_parts = []
-    if query:
-        q_parts.append(query.replace("+", " "))
-    if storage_gb:
-        q_parts.append("1 ТБ" if storage_gb == 1000 else str(storage_gb))
+    slug_info = _MODEL_SLUGS.get(query)
+    storage_slug = _STORAGE_SLUGS.get(storage_gb) if storage_gb else None
 
     params = {}
-    if q_parts:
-        params["q"] = " ".join(q_parts)
     if pmin:
         params["pmin"] = pmin
     if pmax:
@@ -104,12 +137,25 @@ def build_avito_url(filters: dict) -> str:
         params["seller_type"] = "private"
     elif seller_type == "company":
         params["seller_type"] = "shop"
-
-    # Сортировка по дате (новые сначала)
     params["sort"] = "date"
-    params["s"] = "104"  # по дате добавления
+    params["s"] = "104"
 
-    base = f"{AVITO_BASE}/{city}/telefony"
+    if slug_info:
+        brand, model_slug = slug_info
+        base = f"{AVITO_BASE}/{city}/telefony/mobilnye_telefony/{brand}/{model_slug}"
+        if storage_slug:
+            base += f"/{storage_slug}"
+    else:
+        # Для Samsung/Xiaomi/любой — текстовый поиск с GB в запросе
+        q_parts = []
+        if query:
+            q_parts.append(query.replace("+", " "))
+        if storage_gb:
+            q_parts.append("1 ТБ" if storage_gb == 1000 else str(storage_gb))
+        if q_parts:
+            params["q"] = " ".join(q_parts)
+        base = f"{AVITO_BASE}/{city}/telefony"
+
     if params:
         return f"{base}?{urlencode(params, encoding='utf-8')}"
     return base
