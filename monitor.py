@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 import database as db
-from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID, SUBSCRIPTION_DAYS
+from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID, SUBSCRIPTION_DAYS, mark_listings_seen
 from parser import AvitoParser, BLOCK_COOLDOWNS
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime, storage_matches
@@ -347,7 +347,7 @@ class Monitor:
             to_enrich: dict[str, dict] = {}  # listing_id -> listing (unique across watches)
 
             for watch in watchers:
-                new = await db.filter_new_listings(watch["id"], listings)
+                new = await db.filter_new_listings(watch["id"], listings, mark=False)
                 new = filter_listings(new)
                 new.sort(key=listing_datetime, reverse=True)
                 top = new[:MAX_DETAIL_FETCH]
@@ -370,10 +370,14 @@ class Monitor:
                 async with sem:
                     await asyncio.sleep(random.uniform(2.0, 5.0) * self._delay_mult)
                     try:
-                        return await self._parser.fetch_listing_detail(lst)
+                        enriched = await self._parser.fetch_listing_detail(lst)
+                        # Tag as failed if detail page returned no data
+                        if not enriched.get("description") and not enriched.get("params") and not enriched.get("seller_name"):
+                            enriched["_detail_failed"] = True
+                        return enriched
                     except Exception as e:
                         logger.warning(f"Detail fetch failed {lst.get('id')}: {e}")
-                        return lst
+                        return {**lst, "_detail_failed": True}
 
             detailed = await asyncio.gather(*[_enrich(l) for l in to_enrich.values()])
             detailed_by_id = {l["id"]: l for l in detailed}
@@ -395,6 +399,10 @@ class Monitor:
                         logger.info(f"[filter] storage={target_gb}GB: {skipped} excluded")
 
                 for listing in watch_listings:
+                    if listing.get("_detail_failed"):
+                        logger.info(f"[skip] detail failed for {listing.get('id')} — will retry next cycle")
+                        continue
+
                     if not listing.get("params"):
                         self._empty_params_streak += 1
                         if (self._empty_params_streak >= EMPTY_PARAMS_THRESHOLD
@@ -409,6 +417,7 @@ class Monitor:
                     if listing["id"] in user_sent:
                         continue
                     user_sent.add(listing["id"])
+                    await mark_listings_seen(watch["id"], [listing["id"]])
                     await send_listing(self.bot, watch["user_id"], listing, label)
                     self._sent_today += 1
                     await asyncio.sleep(0.4)

@@ -322,7 +322,7 @@ async def get_referral_count(user_id: int) -> int:
             return (await cur.fetchone())[0]
 
 
-async def filter_new_listings(watch_id: int, listings: list[dict]) -> list[dict]:
+async def filter_new_listings(watch_id: int, listings: list[dict], mark: bool = True) -> list[dict]:
     if not listings:
         return []
     async with aiosqlite.connect(DB_PATH) as db:
@@ -336,7 +336,7 @@ async def filter_new_listings(watch_id: int, listings: list[dict]) -> list[dict]
 
         new_listings = [l for l in listings if l["id"] not in seen]
 
-        if new_listings:
+        if mark and new_listings:
             await db.executemany(
                 "INSERT OR IGNORE INTO seen_listings (watch_id, listing_id) VALUES (?, ?)",
                 [(watch_id, l["id"]) for l in new_listings],
@@ -344,3 +344,14 @@ async def filter_new_listings(watch_id: int, listings: list[dict]) -> list[dict]
             await db.commit()
 
         return new_listings
+
+
+async def mark_listings_seen(watch_id: int, listing_ids: list[str]):
+    if not listing_ids:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            "INSERT OR IGNORE INTO seen_listings (watch_id, listing_id) VALUES (?, ?)",
+            [(watch_id, lid) for lid in listing_ids],
+        )
+        await db.commit()
