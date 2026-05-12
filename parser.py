@@ -332,7 +332,7 @@ class AvitoParser:
             if referer:
                 await page.set_extra_http_headers({"Referer": referer})
 
-            await asyncio.sleep(random.uniform(1.5, 4.0))
+            await asyncio.sleep(random.uniform(0.8, 2.5))
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
             early_html = await page.content()
@@ -385,12 +385,12 @@ class AvitoParser:
                     except Exception:
                         return ""
             else:
-                await asyncio.sleep(random.uniform(1.5, 2.5))
+                await asyncio.sleep(random.uniform(0.8, 1.5))
 
             # Human behaviour after content is loaded
             await self._human_mouse(page, vp["width"], vp["height"])
             await self._human_scroll(page)
-            await asyncio.sleep(random.uniform(0.4, 1.0))
+            await asyncio.sleep(random.uniform(0.2, 0.6))
 
             self._block_count = 0  # successful request — reset backoff
             return await page.content()

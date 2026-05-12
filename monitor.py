@@ -301,7 +301,7 @@ class Monitor:
                     logger.debug(f"Skip {url[:50]} — checked {now - last_checked:.0f}s ago")
                     continue
                 if processed > 0:
-                    await asyncio.sleep(random.uniform(8.0, 20.0) * self._delay_mult)
+                    await asyncio.sleep(random.uniform(4.0, 10.0) * self._delay_mult)
                 self._url_last_checked[url] = now
                 processed += 1
                 if await self._check_url_group(url, watchers):
@@ -323,7 +323,7 @@ class Monitor:
                 processed = 0
                 for url, watchers in shuffled:
                     if processed > 0:
-                        await asyncio.sleep(random.uniform(8.0, 20.0) * self._delay_mult)
+                        await asyncio.sleep(random.uniform(4.0, 10.0) * self._delay_mult)
                     processed += 1
                     if await self._check_url_group(url, watchers):
                         found_any = True
@@ -368,7 +368,7 @@ class Monitor:
 
             async def _enrich(lst):
                 async with sem:
-                    await asyncio.sleep(random.uniform(4.0, 9.0) * self._delay_mult)
+                    await asyncio.sleep(random.uniform(2.0, 5.0) * self._delay_mult)
                     try:
                         return await self._parser.fetch_listing_detail(lst)
                     except Exception as e:
