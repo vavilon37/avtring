@@ -15,7 +15,7 @@ from listing_filter import filter_listings, filter_after_detail, listing_datetim
 
 MAX_DETAIL_FETCH = 5    # max detail pages per cycle
 DETAIL_CONCURRENCY = 1  # sequential detail fetches — less suspicious
-MIN_PAID_URL_INTERVAL = 30.0  # seconds between re-checks of the same URL
+MIN_PAID_URL_INTERVAL = 20.0  # seconds between re-checks of the same URL
 
 logger = logging.getLogger(__name__)
 
@@ -234,13 +234,13 @@ class Monitor:
 
             if found_any:
                 no_result_streak = 0
-                delay = random.uniform(8, 18)
+                delay = random.uniform(5, 12)
             else:
                 # Don't grow streak while Avito cooldown is active — parser skips anyway
                 parser_blocked = time.time() < self._parser._blocked_until
                 if not parser_blocked:
                     no_result_streak = min(no_result_streak + 1, 5)
-                base = min(15 * (1.5 ** no_result_streak), 30)
+                base = min(10 * (1.5 ** no_result_streak), 25)
                 delay = random.uniform(base * 0.7, base * 1.3)
 
             logger.debug(f"Next check in {delay:.1f}s (streak={no_result_streak})")
@@ -293,7 +293,7 @@ class Monitor:
                     logger.debug(f"Skip {url[:50]} — checked {now - last_checked:.0f}s ago")
                     continue
                 if processed > 0:
-                    await asyncio.sleep(random.uniform(4.0, 10.0) * self._delay_mult)
+                    await asyncio.sleep(random.uniform(2.0, 5.0) * self._delay_mult)
                 self._url_last_checked[url] = now
                 processed += 1
                 if await self._check_url_group(url, watchers):
@@ -315,7 +315,7 @@ class Monitor:
                 processed = 0
                 for url, watchers in shuffled:
                     if processed > 0:
-                        await asyncio.sleep(random.uniform(4.0, 10.0) * self._delay_mult)
+                        await asyncio.sleep(random.uniform(2.0, 5.0) * self._delay_mult)
                     processed += 1
                     if await self._check_url_group(url, watchers):
                         found_any = True
