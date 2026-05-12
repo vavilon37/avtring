@@ -204,14 +204,6 @@ class Monitor:
                 self._sent_today = 0
                 self._expiry_notified.clear()
 
-            # Session break every 3-4 hours — looks like a real user
-            break_interval = random.uniform(3 * 3600, 4 * 3600)
-            if real_now - self._last_break > break_interval and self._last_break > 0:
-                break_time = random.uniform(8 * 60, 12 * 60)
-                logger.info(f"Session break: pausing {break_time/60:.0f} min")
-                self._last_break = real_now
-                await asyncio.sleep(break_time)
-                continue
             if self._last_break == 0:
                 self._last_break = real_now
 
@@ -368,7 +360,7 @@ class Monitor:
 
             async def _enrich(lst):
                 async with sem:
-                    await asyncio.sleep(random.uniform(2.0, 5.0) * self._delay_mult)
+                    await asyncio.sleep(random.uniform(0.8, 2.0) * self._delay_mult)
                     try:
                         enriched = await self._parser.fetch_listing_detail(lst)
                         # Tag as failed if detail page returned no data

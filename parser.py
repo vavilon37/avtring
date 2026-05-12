@@ -147,7 +147,7 @@ if (window.AudioContext || window.webkitAudioContext) {{
 """
 
 
-BLOCK_COOLDOWNS = [120, 300, 600]  # 2 min → 5 min → 10 min backoff
+BLOCK_COOLDOWNS = [60, 180, 300]  # 1 min → 3 min → 5 min backoff
 
 
 class AvitoParser:
