@@ -17,7 +17,7 @@ import database as db
 from database import FREE_MAX_WATCHES, TRIAL_MAX_WATCHES, PAID_MAX_WATCHES, OWNER_ID, OWNER_IDS, TRIAL_DAYS
 from database import pause_user, resume_user, is_user_paused
 from filters import (
-    PHONE_MODELS, CONDITIONS, SELLER_TYPES, CITIES,
+    PHONE_MODELS, CONDITIONS, SELLER_TYPES, CITIES, STORAGE_OPTIONS,
     build_avito_url, label_from_filters,
 )
 from payments import create_invoice, check_invoice, PRICE_RUB, SUBSCRIPTION_DAYS
@@ -43,6 +43,7 @@ BTN_HELP = "❓ Помощь"
 
 class AddWatch(StatesGroup):
     model     = State()
+    storage   = State()
     price_min = State()
     price_max = State()
     condition = State()
@@ -78,9 +79,9 @@ def _register_handlers(dp: Dispatcher):
     dp.message.register(_cmd_ref,  F.text == BTN_REF)
     dp.message.register(_cmd_help, F.text == BTN_HELP)
 
-    # FSM — мультивыбор моделей
-    dp.callback_query.register(_cb_model_toggle, F.data.startswith("mt:"),   AddWatch.model)
-    dp.callback_query.register(_cb_model_done,   F.data == "model_done",     AddWatch.model)
+    # FSM
+    dp.callback_query.register(_cb_model_select, F.data.startswith("mt:"),    AddWatch.model)
+    dp.callback_query.register(_cb_storage,      F.data.startswith("stor:"),  AddWatch.storage)
     dp.message.register(_handle_price_min, AddWatch.price_min)
     dp.message.register(_handle_price_max, AddWatch.price_max)
     dp.callback_query.register(_cb_condition, F.data.startswith("cond:"),   AddWatch.condition)
@@ -105,18 +106,19 @@ def _main_menu() -> ReplyKeyboardMarkup:
     )
 
 
-def _kb_models(selected: set[str]) -> InlineKeyboardMarkup:
-    buttons = []
-    for name, q in PHONE_MODELS.items():
-        check = "✅ " if q in selected else ""
-        buttons.append([InlineKeyboardButton(
-            text=f"{check}{name}",
-            callback_data=f"mt:{q}",
-        )])
-    buttons.append([InlineKeyboardButton(
-        text=f"➡️ Готово ({len(selected)} выбрано)" if selected else "➡️ Готово (все модели)",
-        callback_data="model_done",
-    )])
+def _kb_models() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text=name, callback_data=f"mt:{q}")]
+        for name, q in PHONE_MODELS.items()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _kb_storage() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text=label, callback_data=f"stor:{gb}")]
+        for label, gb in STORAGE_OPTIONS.items()
+    ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -308,50 +310,44 @@ async def _cmd_add(msg: Message, state: FSMContext):
         return
 
     await state.set_state(AddWatch.model)
-    await state.update_data(selected_models=[])
     await msg.answer(
-        "📱 <b>Шаг 1/6 — Модели</b>\n\n"
-        "Выбери одну или несколько моделей.\n"
-        "Нажми ➡️ Готово когда закончишь.",
+        "📱 <b>Шаг 1/7 — Модель</b>\n\nНажми на модель чтобы выбрать её:",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove(),
     )
-    await msg.answer("👇", reply_markup=_kb_models(set()))
+    await msg.answer("👇", reply_markup=_kb_models())
 
 
-async def _cb_model_toggle(cb: CallbackQuery, state: FSMContext):
+async def _cb_model_select(cb: CallbackQuery, state: FSMContext):
     q = cb.data.split(":", 1)[1]
-    data = await state.get_data()
-    selected: list = data.get("selected_models", [])
-
-    if q in selected:
-        selected.remove(q)
-    else:
-        selected.append(q)
-
-    await state.update_data(selected_models=selected)
-    try:
-        await cb.message.edit_reply_markup(reply_markup=_kb_models(set(selected)))
-    except Exception:
-        pass
-    await cb.answer()
-
-
-async def _cb_model_done(cb: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected: list = data.get("selected_models", [])
-    query = " ".join(selected) if selected else ""
-    await state.update_data(query=query)
+    await state.update_data(query=q)
     try:
         await cb.message.edit_reply_markup()
     except Exception:
         pass
     await cb.message.answer(
-        "💰 <b>Шаг 2/6 — Минимальная цена (₽)</b>\n\n"
+        "💾 <b>Шаг 2/7 — Объём памяти</b>",
+        parse_mode="HTML",
+        reply_markup=_kb_storage(),
+    )
+    await state.set_state(AddWatch.storage)
+    await cb.answer()
+
+
+async def _cb_storage(cb: CallbackQuery, state: FSMContext):
+    gb = int(cb.data.split(":", 1)[1])
+    await state.update_data(storage_gb=gb)
+    try:
+        await cb.message.edit_reply_markup()
+    except Exception:
+        pass
+    await cb.message.answer(
+        "💰 <b>Шаг 3/7 — Минимальная цена (₽)</b>\n\n"
         "Введи число или <b>0</b> чтобы пропустить:",
         parse_mode="HTML",
     )
     await state.set_state(AddWatch.price_min)
+    await cb.answer()
 
 
 async def _handle_price_min(msg: Message, state: FSMContext):
@@ -359,7 +355,7 @@ async def _handle_price_min(msg: Message, state: FSMContext):
     pmin = val if val.isdigit() and int(val) > 0 else ""
     await state.update_data(pmin=pmin)
     await msg.answer(
-        "💰 <b>Шаг 3/6 — Максимальная цена (₽)</b>\n\n"
+        "💰 <b>Шаг 4/7 — Максимальная цена (₽)</b>\n\n"
         "Введи число или <b>0</b> чтобы пропустить:",
         parse_mode="HTML",
     )
@@ -371,7 +367,7 @@ async def _handle_price_max(msg: Message, state: FSMContext):
     pmax = val if val.isdigit() and int(val) > 0 else ""
     await state.update_data(pmax=pmax)
     await msg.answer(
-        "📦 <b>Шаг 4/6 — Состояние</b>",
+        "📦 <b>Шаг 5/7 — Состояние</b>",
         parse_mode="HTML",
         reply_markup=_kb_conditions(),
     )
@@ -386,7 +382,7 @@ async def _cb_condition(cb: CallbackQuery, state: FSMContext):
     except Exception:
         pass
     await cb.message.answer(
-        "👤 <b>Шаг 5/6 — Тип продавца</b>",
+        "👤 <b>Шаг 6/7 — Тип продавца</b>",
         parse_mode="HTML",
         reply_markup=_kb_sellers(),
     )
@@ -401,7 +397,7 @@ async def _cb_seller(cb: CallbackQuery, state: FSMContext):
     except Exception:
         pass
     await cb.message.answer(
-        "🏙 <b>Шаг 6/6 — Город</b>",
+        "🏙 <b>Шаг 7/7 — Город</b>",
         parse_mode="HTML",
         reply_markup=_kb_cities(),
     )
@@ -416,7 +412,8 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
 
     url = build_avito_url(data)
     label = label_from_filters(data)
-    await db.add_watch(cb.from_user.id, url, label)
+    storage_gb = data.get("storage_gb", 0)
+    await db.add_watch(cb.from_user.id, url, label, storage_gb)
 
     plan = await db.get_user_plan(cb.from_user.id)
     interval_note = "каждые 15 секунд" if plan in ("paid", "trial") else "раз в 5 минут"

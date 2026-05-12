@@ -213,3 +213,42 @@ def filter_after_detail(listings: list[dict]) -> list[dict]:
     if skipped:
         logger.info(f"[filter] post: {skipped} resellers removed, {len(result)} remain")
     return result
+
+
+_KNOWN_GB = [64, 128, 256, 512]
+_TB_RE = re.compile(r'\b1\s*(ТБ|тб|TB|tb)\b', re.IGNORECASE)
+
+
+def storage_matches(listing: dict, target_gb: int) -> bool:
+    """
+    Returns False only when a DIFFERENT storage value is positively detected.
+    When storage is absent from the listing data, returns True (don't miss real listings).
+    target_gb=0 means "any" — always True.
+    """
+    if not target_gb:
+        return True
+
+    parts = [listing.get("title") or ""]
+    for v in (listing.get("params") or {}).values():
+        parts.append(str(v))
+    text = " ".join(parts)
+
+    if target_gb == 1000:
+        if _TB_RE.search(text):
+            return True
+        for gb in _KNOWN_GB:
+            if re.search(rf'\b{gb}\s*(ГБ|гб|GB|gb)', text, re.IGNORECASE):
+                return False
+        return True
+
+    target_re = re.compile(rf'\b{target_gb}\s*(ГБ|гб|GB|gb)', re.IGNORECASE)
+    if target_re.search(text):
+        return True
+
+    for gb in _KNOWN_GB:
+        if gb != target_gb and re.search(rf'\b{gb}\s*(ГБ|гб|GB|gb)', text, re.IGNORECASE):
+            return False
+    if _TB_RE.search(text):
+        return False
+
+    return True  # storage not mentioned — include

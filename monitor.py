@@ -11,7 +11,7 @@ import database as db
 from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID, SUBSCRIPTION_DAYS
 from parser import AvitoParser, BLOCK_COOLDOWNS
 from bot import send_listing
-from listing_filter import filter_listings, filter_after_detail, listing_datetime
+from listing_filter import filter_listings, filter_after_detail, listing_datetime, storage_matches
 
 MAX_DETAIL_FETCH = 5    # max detail pages per cycle
 DETAIL_CONCURRENCY = 1  # sequential detail fetches — less suspicious
@@ -385,6 +385,14 @@ class Monitor:
                     detailed_by_id.get(l["id"], l) for l in per_watch[watch["id"]]
                 ]
                 watch_listings = filter_after_detail(watch_listings)
+
+                target_gb = watch.get("storage_gb", 0)
+                if target_gb:
+                    before = len(watch_listings)
+                    watch_listings = [l for l in watch_listings if storage_matches(l, target_gb)]
+                    skipped = before - len(watch_listings)
+                    if skipped:
+                        logger.info(f"[filter] storage={target_gb}GB: {skipped} excluded")
 
                 for listing in watch_listings:
                     if not listing.get("params"):

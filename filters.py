@@ -54,6 +54,16 @@ SELLER_TYPES = {
     "Все": "",
 }
 
+# Объём встроенной памяти
+STORAGE_OPTIONS = {
+    "64 ГБ":  64,
+    "128 ГБ": 128,
+    "256 ГБ": 256,
+    "512 ГБ": 512,
+    "1 ТБ":   1000,
+    "Любой":  0,
+}
+
 # Города (топ)
 CITIES = {
     "Вся Россия": "rossiya",
@@ -73,10 +83,17 @@ def build_avito_url(filters: dict) -> str:
     pmax = filters.get("pmax", "")
     condition = filters.get("condition", "")
     seller_type = filters.get("seller_type", "")
+    storage_gb = filters.get("storage_gb", 0)
+
+    q_parts = []
+    if query:
+        q_parts.append(query.replace("+", " "))
+    if storage_gb:
+        q_parts.append("1 ТБ" if storage_gb == 1000 else str(storage_gb))
 
     params = {}
-    if query:
-        params["q"] = query.replace("+", " ")
+    if q_parts:
+        params["q"] = " ".join(q_parts)
     if pmin:
         params["pmin"] = pmin
     if pmax:
@@ -102,9 +119,10 @@ def label_from_filters(filters: dict) -> str:
     parts = []
     query = filters.get("query", "")
     if query:
-        # query содержит несколько моделей через пробел — показываем красиво
-        models = [q.replace("+", " ") for q in query.split()]
-        parts.append(", ".join(models))
+        parts.append(query.replace("+", " "))
+    storage_gb = filters.get("storage_gb", 0)
+    if storage_gb:
+        parts.append("1 ТБ" if storage_gb == 1000 else f"{storage_gb} ГБ")
     if filters.get("pmin") or filters.get("pmax"):
         pmin = filters.get("pmin", "0")
         pmax = filters.get("pmax", "∞")

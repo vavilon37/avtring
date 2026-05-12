@@ -67,6 +67,10 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN is_paused INTEGER DEFAULT 0")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE watches ADD COLUMN storage_gb INTEGER DEFAULT 0")
+        except Exception:
+            pass
         await db.commit()
     logger.info("Database initialized")
 
@@ -163,11 +167,11 @@ async def get_invoice_user(invoice_id: str) -> int | None:
             return row[0] if row else None
 
 
-async def add_watch(user_id: int, url: str, label: str = "") -> int:
+async def add_watch(user_id: int, url: str, label: str = "", storage_gb: int = 0) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "INSERT INTO watches (user_id, url, label) VALUES (?, ?, ?)",
-            (user_id, url, label),
+            "INSERT INTO watches (user_id, url, label, storage_gb) VALUES (?, ?, ?, ?)",
+            (user_id, url, label, storage_gb),
         )
         await db.commit()
         return cursor.lastrowid
