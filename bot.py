@@ -532,8 +532,7 @@ async def _cb_delete(cb: CallbackQuery):
 
 def _build_listing_text(listing: dict, watch_label: str) -> str:
     lines = [f"🔔 <b>{watch_label}</b>\n"]
-    lines.append(f"📱 <b>{listing['title']}</b>")
-    lines.append(f"💰 <b>{listing['price']}</b>")
+    lines.append(f"📱 <b>{listing['title']}</b> — <b>{listing['price']}</b>")
 
     params: dict = listing.get("params", {})
     if params:
