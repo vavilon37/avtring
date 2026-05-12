@@ -244,8 +244,11 @@ class Monitor:
                 no_result_streak = 0
                 delay = random.uniform(8, 18)
             else:
-                no_result_streak = min(no_result_streak + 1, 5)
-                base = min(15 * (1.5 ** no_result_streak), 120)
+                # Don't grow streak while Avito cooldown is active — parser skips anyway
+                parser_blocked = time.time() < self._parser._blocked_until
+                if not parser_blocked:
+                    no_result_streak = min(no_result_streak + 1, 5)
+                base = min(15 * (1.5 ** no_result_streak), 30)
                 delay = random.uniform(base * 0.7, base * 1.3)
 
             logger.debug(f"Next check in {delay:.1f}s (streak={no_result_streak})")
