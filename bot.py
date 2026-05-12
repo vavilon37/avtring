@@ -531,7 +531,7 @@ async def _cb_delete(cb: CallbackQuery):
 # ── Listing card ──────────────────────────────────────────────────────────────
 
 def _build_listing_text(listing: dict, watch_label: str) -> str:
-    lines = [f"🔔 <b>{watch_label}</b>\n"]
+    lines = [f"🔔 <b>{watch_label}</b>"]
     lines.append(f"📱 <b>{listing['title']}</b> — <b>{listing['price']}</b>")
 
     params: dict = listing.get("params", {})
