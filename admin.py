@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import os
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -80,6 +83,7 @@ def _admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎁 Выдать дни", callback_data="adm:give"),
         ],
         [InlineKeyboardButton(text="🔄 Перезапустить парсер", callback_data="adm:restart")],
+        [InlineKeyboardButton(text="⬇️ Git Pull + перезапуск", callback_data="adm:gitpull")],
     ])
 
 
@@ -245,6 +249,30 @@ async def _cb_restart(cb: CallbackQuery):
         await cb.message.answer("❌ Монитор не найден.")
 
 
+async def _cb_gitpull(cb: CallbackQuery):
+    if cb.from_user.id not in OWNER_IDS:
+        return await cb.answer()
+    await cb.answer("Подтягиваю...", show_alert=False)
+    await cb.message.answer("⬇️ Запускаю git pull...")
+    try:
+        cwd = os.path.dirname(os.path.abspath(__file__))
+        result = subprocess.run(
+            ["git", "fetch", "origin"],
+            capture_output=True, text=True, cwd=cwd,
+        )
+        result2 = subprocess.run(
+            ["git", "reset", "--hard", "origin/main"],
+            capture_output=True, text=True, cwd=cwd,
+        )
+        out = (result.stdout + result.stderr + result2.stdout + result2.stderr).strip()
+        await cb.message.answer(f"✅ Готово:\n<code>{out}</code>\n\nПерезапускаюсь...", parse_mode="HTML")
+    except Exception as e:
+        await cb.message.answer(f"❌ Ошибка: {e}")
+        return
+    await asyncio.sleep(1)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 # ── Register ──────────────────────────────────────────────────────────────────
 
 def register_admin_handlers(dp: Dispatcher):
@@ -253,6 +281,7 @@ def register_admin_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_users,     F.data.startswith("adm:users:"))
     dp.callback_query.register(_cb_broadcast, F.data == "adm:broadcast")
     dp.callback_query.register(_cb_give,      F.data == "adm:give")
-    dp.callback_query.register(_cb_restart,   F.data == "adm:restart")
+    dp.callback_query.register(_cb_restart,  F.data == "adm:restart")
+    dp.callback_query.register(_cb_gitpull, F.data == "adm:gitpull")
     dp.message.register(_handle_broadcast, AdminState.broadcast)
     dp.message.register(_handle_give,      AdminState.give)
