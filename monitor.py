@@ -313,9 +313,16 @@ class Monitor:
                         found = True
                 return found
 
+            async def _safe_run(coro, label: str) -> bool:
+                try:
+                    return await asyncio.wait_for(coro, timeout=150.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Parser group '{label}' timed out after 150s, skipping")
+                    return False
+
             results = await asyncio.gather(
-                _run_paid(self._parsers[0], parser_groups[0]),
-                _run_paid(self._parsers[1], parser_groups[1]),
+                _safe_run(_run_paid(self._parsers[0], parser_groups[0]), "parser-0"),
+                _safe_run(_run_paid(self._parsers[1], parser_groups[1]), "parser-1"),
             )
             if any(results):
                 found_any = True

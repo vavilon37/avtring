@@ -333,7 +333,14 @@ class AvitoParser:
                 await page.set_extra_http_headers({"Referer": referer})
 
             await asyncio.sleep(random.uniform(0.3, 1.2))
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            try:
+                await asyncio.wait_for(
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000),
+                    timeout=65.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"page.goto asyncio timeout for {url[:60]}")
+                return ""
 
             early_html = await page.content()
             if self._is_blocked(early_html):
