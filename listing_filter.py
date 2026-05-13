@@ -101,6 +101,20 @@ def _parse_avito_date(date_str: str) -> datetime | None:
             except ValueError:
                 pass
 
+    # "11 мая" or "11 мая 2025" — date without time (old listing shown on list page)
+    m = re.search(r"(\d{1,2})\s+(\w+)(?:\s+(\d{4}))?", s)
+    if m:
+        month = _MONTHS_RU.get(m.group(2))
+        if month:
+            year = int(m.group(3)) if m.group(3) else now.year
+            try:
+                t = datetime(year, month, int(m.group(1)), 0, 0, tzinfo=timezone.utc)
+                if t > now + timedelta(hours=1):
+                    t = t.replace(year=year - 1)
+                return t
+            except ValueError:
+                pass
+
     return None
 
 
