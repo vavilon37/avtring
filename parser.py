@@ -264,9 +264,9 @@ class AvitoParser:
         try:
             raw = await self._context.cookies(urls=["https://www.avito.ru"])
             self._curl_cookies = {c["name"]: c["value"] for c in raw}
-            logger.debug(f"curl_cffi: saved {len(self._curl_cookies)} cookies")
+            logger.info(f"curl_cffi: saved {len(self._curl_cookies)} cookies")
         except Exception as e:
-            logger.debug(f"cookie extract failed: {e}")
+            logger.info(f"cookie extract failed: {e}")
 
     async def _cffi_get(self, url: str, referer: str = "") -> str:
         """Chrome-impersonating HTTP fetch via curl_cffi. No browser needed.
@@ -292,11 +292,11 @@ class AvitoParser:
                 html = r.text
                 if not self._is_blocked(html):
                     return html
-                logger.debug(f"cffi: blocked page ({len(html)} chars)")
+                logger.info(f"cffi: blocked page ({len(html)} chars) for {url[:60]}")
             else:
-                logger.debug(f"cffi: HTTP {r.status_code} for {url[:60]}")
+                logger.info(f"cffi: HTTP {r.status_code} for {url[:60]}")
         except Exception as e:
-            logger.debug(f"cffi error {url[:50]}: {e}")
+            logger.info(f"cffi error {url[:50]}: {e}")
         return ""
 
     @staticmethod
