@@ -534,14 +534,16 @@ class AvitoParser:
                     timeout=15,
                     allow_redirects=True,
                 )
+            ct = r.headers.get("content-type", "?")
             if r.status_code != 200:
-                logger.info(f"RSS: HTTP {r.status_code} ({len(r.text)} chars) for {rss_url[:70]}")
+                logger.info(f"RSS: HTTP {r.status_code} ct={ct!r} for {rss_url[:70]}")
                 return []
+            logger.info(f"RSS: 200 OK ct={ct!r} len={len(r.text)} first200={r.text[:200]!r}")
             listings = self._parse_rss(r.text)
             if listings:
                 logger.info(f"RSS: {len(listings)} items from {rss_url[:70]}")
             else:
-                logger.info(f"RSS: 200 OK but 0 items parsed ({len(r.text)} chars)")
+                logger.info(f"RSS: 0 items parsed")
             return listings
         except Exception as e:
             logger.info(f"RSS fetch failed: {e}")
@@ -563,7 +565,7 @@ class AvitoParser:
 
         items = soup.find_all("item")
         if not items:
-            logger.debug(f"RSS: no <item> found; first 300 chars: {clean[:300]!r}")
+            logger.info(f"RSS: no <item> in soup; tags={[t.name for t in soup.find_all(True)][:20]}")
             return []
 
         listings = []
