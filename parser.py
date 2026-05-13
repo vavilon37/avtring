@@ -17,6 +17,14 @@ except ImportError:
     _HAS_STEALTH = False
     logger.info("playwright-stealth not installed — using built-in stealth only")
 
+try:
+    from curl_cffi.requests import AsyncSession as _CurlSession
+    _HAS_CURL_CFFI = True
+    logger.info("curl-cffi loaded — fast HTTP path enabled")
+except ImportError:
+    _HAS_CURL_CFFI = False
+    logger.info("curl-cffi not installed — Playwright only")
+
 PROFILE_DIR = str(Path(__file__).parent / "chrome_profile")
 PROFILE_DIRS = [
     str(Path(__file__).parent / f"chrome_profile_{i}") for i in range(6)
@@ -149,6 +157,20 @@ if (window.AudioContext || window.webkitAudioContext) {{
 
 BLOCK_COOLDOWNS = [60, 180, 300]  # 1 min → 3 min → 5 min backoff
 
+_CFFI_HEADERS = {
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "cache-control": "max-age=0",
+    "upgrade-insecure-requests": "1",
+    "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131", "Not_A Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-user": "?1",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+}
+
 
 class AvitoParser:
     def __init__(self, on_blocked=None):
@@ -162,6 +184,7 @@ class AvitoParser:
         self._context_lock = asyncio.Lock()
         self._profile_idx: int = random.randint(0, len(PROFILE_DIRS) - 1)
         self._needs_warmup: bool = False
+        self._curl_cookies: dict = {}  # cookies extracted from Playwright for curl_cffi
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -171,6 +194,7 @@ class AvitoParser:
     async def _new_context(self):
         if self._context:
             await self._context.close()
+        self._curl_cookies = {}  # old profile cookies are invalid
 
         profile = PROFILE_DIRS[self._profile_idx % len(PROFILE_DIRS)]
         self._profile_idx += 1
@@ -231,6 +255,48 @@ class AvitoParser:
         if self._pw:
             await self._pw.stop()
         logger.info("Parser stopped")
+
+    async def _extract_cookies(self) -> None:
+        """Copy Avito cookies from Playwright context → used by curl_cffi fast path."""
+        if not self._context:
+            return
+        try:
+            raw = await self._context.cookies(urls=["https://www.avito.ru"])
+            self._curl_cookies = {c["name"]: c["value"] for c in raw}
+            logger.debug(f"curl_cffi: saved {len(self._curl_cookies)} cookies")
+        except Exception as e:
+            logger.debug(f"cookie extract failed: {e}")
+
+    async def _cffi_get(self, url: str, referer: str = "") -> str:
+        """Chrome-impersonating HTTP fetch via curl_cffi. No browser needed.
+        Returns HTML string, or '' if unavailable/blocked."""
+        if not _HAS_CURL_CFFI or not self._curl_cookies:
+            return ""
+        headers = dict(_CFFI_HEADERS)
+        if referer:
+            headers["referer"] = referer
+            headers["sec-fetch-site"] = "same-origin"
+        else:
+            headers["sec-fetch-site"] = "none"
+        try:
+            async with _CurlSession(impersonate="chrome131") as session:
+                r = await session.get(
+                    url,
+                    headers=headers,
+                    cookies=self._curl_cookies,
+                    timeout=20,
+                    allow_redirects=True,
+                )
+            if r.status_code == 200:
+                html = r.text
+                if not self._is_blocked(html):
+                    return html
+                logger.debug(f"cffi: blocked page ({len(html)} chars)")
+            else:
+                logger.debug(f"cffi: HTTP {r.status_code} for {url[:60]}")
+        except Exception as e:
+            logger.debug(f"cffi error {url[:50]}: {e}")
+        return ""
 
     @staticmethod
     def _is_blocked(html: str) -> bool:
@@ -296,6 +362,7 @@ class AvitoParser:
             if i < len(pages_to_visit) - 1:
                 await asyncio.sleep(random.uniform(3.0, 7.0))
         logger.info("Warmup complete — starting real requests")
+        await self._extract_cookies()
 
     @staticmethod
     async def _human_scroll(page):
@@ -318,6 +385,14 @@ class AvitoParser:
             except Exception as e:
                 logger.warning(f"Warmup failed: {e}")
 
+        # ── Fast path: curl_cffi (no browser, Chrome TLS fingerprint) ──
+        html = await self._cffi_get(url, referer)
+        if html:
+            logger.info(f"cffi OK ({len(html)} chars): {url[:70]}")
+            self._block_count = 0
+            return html
+
+        # ── Slow path: Playwright browser ─────────────────────────────
         async with self._context_lock:
             self._request_count += 1
             if self._request_count >= self._rotate_at:
@@ -400,7 +475,9 @@ class AvitoParser:
             await asyncio.sleep(random.uniform(0.2, 0.6))
 
             self._block_count = 0  # successful request — reset backoff
-            return await page.content()
+            html = await page.content()
+            await self._extract_cookies()  # refresh curl_cffi cookies
+            return html
         except Exception as e:
             logger.error(f"Page error {url}: {e}")
             return ""
