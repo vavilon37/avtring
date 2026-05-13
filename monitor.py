@@ -15,7 +15,7 @@ from listing_filter import filter_listings, filter_after_detail, listing_datetim
 
 MAX_DETAIL_FETCH = 5    # max detail pages per cycle
 DETAIL_CONCURRENCY = 1  # sequential detail fetches — less suspicious
-MIN_PAID_URL_INTERVAL = 20.0  # seconds between re-checks of the same URL
+MIN_PAID_URL_INTERVAL = 60.0  # seconds between re-checks of the same URL
 
 logger = logging.getLogger(__name__)
 

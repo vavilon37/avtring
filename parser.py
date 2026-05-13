@@ -293,6 +293,16 @@ class AvitoParser:
                 if not self._is_blocked(html):
                     return html
                 logger.info(f"cffi: blocked page ({len(html)} chars) for {url[:60]}")
+            elif r.status_code == 429:
+                cooldown = BLOCK_COOLDOWNS[min(self._block_count, len(BLOCK_COOLDOWNS) - 1)]
+                self._blocked_until = time.time() + cooldown
+                self._block_count += 1
+                logger.warning(f"cffi: 429 rate-limited — {cooldown}s cooldown (block #{self._block_count})")
+                if self._on_blocked:
+                    try:
+                        await self._on_blocked()
+                    except Exception:
+                        pass
             else:
                 logger.info(f"cffi: HTTP {r.status_code} for {url[:60]}")
         except Exception as e:
@@ -392,6 +402,10 @@ class AvitoParser:
             logger.info(f"cffi OK ({len(html)} chars): {url[:70]}")
             self._block_count = 0
             return html
+
+        # If cffi triggered a 429 block cooldown, don't try Playwright
+        if time.time() < self._blocked_until:
+            return ""
 
         # ── Slow path: Playwright browser ─────────────────────────────
         async with self._context_lock:
