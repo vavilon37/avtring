@@ -339,7 +339,24 @@ def extract_js_string(text: str, start_needle: str) -> str | None:
         pos += 1
     return ''.join(result)
 
-raw_encoded = extract_js_string(html, 'window.preloadedState')
+# Ищем в декодированном контенте скриптов (BeautifulSoup декодирует &quot; и т.д.)
+raw_encoded = None
+source_idx = None
+for si, sc in enumerate(scripts):
+    content = sc.string or ""
+    if 'preloadedState' in content:
+        raw_encoded = extract_js_string(content, 'window.preloadedState')
+        if raw_encoded:
+            source_idx = si
+            print(f"   Найден в script[{si}], encoded длина={len(raw_encoded):,}")
+            break
+
+# Если не нашли через BeautifulSoup — пробуем сырой HTML (иногда сидит вне тегов)
+if not raw_encoded:
+    raw_encoded = extract_js_string(html, 'window.preloadedState')
+    if raw_encoded:
+        print(f"   Найден в сыром HTML, encoded длина={len(raw_encoded):,}")
+
 if raw_encoded:
     decoded = unquote(raw_encoded)
     print(f"   Длина encoded: {len(raw_encoded):,} chars")
@@ -395,11 +412,17 @@ if raw_encoded:
         print(f"   Декодированный текст (100KB) → recon_results/preloadedState_decoded.txt")
 else:
     print("   window.preloadedState не найден")
-    # Попробуем найти window.__mfe тоже
-    raw_mfe = extract_js_string(html, 'window.__mfe')
-    if raw_mfe:
-        decoded_mfe = unquote(raw_mfe)
-        print(f"   window.__mfe decoded: {decoded_mfe[:200]!r}")
+    # Показываем начало script[61] через BeautifulSoup (уже декодировано)
+    if len(scripts) > 61:
+        s61 = scripts[61].string or ""
+        print(f"   script[61] через BS (первые 400 chars): {s61[:400]!r}")
+    # Ищем любые переменные с preloaded/state в имени
+    for sc in scripts:
+        c = sc.string or ""
+        if 'preloaded' in c.lower() or 'initialState' in c.lower():
+            m2 = re.search(r'window\.(\w+)\s*=\s*["\']', c)
+            if m2:
+                print(f"   В скрипте найдено: window.{m2.group(1)}")
 
 print(f"\n{'='*60}")
 print("ГОТОВО. Проверь recon_results/")
