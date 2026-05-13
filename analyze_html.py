@@ -311,51 +311,58 @@ print(f"\n{'='*60}")
 print("9. window.preloadedState — декодируем и разбираем")
 from urllib.parse import unquote
 
-def extract_js_string(text: str, start_needle: str) -> str | None:
-    """Найти JS-строковое значение в тексте без regex-ограничений по длине."""
-    pos = text.find(start_needle)
-    if pos == -1:
+def extract_quoted_value(text: str, needle: str) -> str | None:
+    """Извлечь значение JS-строки после needle = '...' или needle = \"...\""""
+    idx = text.find(needle)
+    if idx < 0:
         return None
-    pos += len(start_needle)
-    # Пропускаем пробелы и = и открывающую кавычку
-    while pos < len(text) and text[pos] in ' \t\n\r=':
-        pos += 1
-    if pos >= len(text):
+    eq = text.find('=', idx + len(needle))
+    if eq < 0 or eq - idx > 30:
         return None
-    quote_char = text[pos]
-    if quote_char not in ('"', "'"):
+    # Найти открывающую кавычку
+    q_pos = eq + 1
+    while q_pos < len(text) and text[q_pos] in ' \t\r\n':
+        q_pos += 1
+    if q_pos >= len(text) or text[q_pos] not in ('"', "'"):
         return None
-    pos += 1  # пропускаем открывающую кавычку
-    result = []
-    while pos < len(text):
-        c = text[pos]
-        if c == '\\' and pos + 1 < len(text):
-            result.append(text[pos + 1])
-            pos += 2
+    qchar = text[q_pos]
+    # Ищем закрывающую кавычку (конец строки)
+    # Быстрый способ: найти '"; ' или "';" в тексте с этой позиции
+    end = q_pos + 1
+    while end < len(text):
+        if text[end] == '\\':
+            end += 2
             continue
-        if c == quote_char:
-            break
-        result.append(c)
-        pos += 1
-    return ''.join(result)
+        if text[end] == qchar:
+            return text[q_pos + 1:end]
+        end += 1
+    return None
 
-# Ищем в декодированном контенте скриптов (BeautifulSoup декодирует &quot; и т.д.)
+# Сначала пробуем через BeautifulSoup .string (декодирует HTML entities)
 raw_encoded = None
-source_idx = None
 for si, sc in enumerate(scripts):
-    content = sc.string or ""
-    if 'preloadedState' in content:
-        raw_encoded = extract_js_string(content, 'window.preloadedState')
-        if raw_encoded:
-            source_idx = si
-            print(f"   Найден в script[{si}], encoded длина={len(raw_encoded):,}")
-            break
-
-# Если не нашли через BeautifulSoup — пробуем сырой HTML (иногда сидит вне тегов)
-if not raw_encoded:
-    raw_encoded = extract_js_string(html, 'window.preloadedState')
+    sc_text = sc.string
+    if not sc_text or 'preloadedState' not in sc_text:
+        continue
+    print(f"   'preloadedState' найден в script[{si}] (len={len(sc_text):,})")
+    # Debug: показываем контекст вокруг preloadedState
+    ps_idx = sc_text.find('preloadedState')
+    print(f"   Контекст: {sc_text[max(0,ps_idx-5):ps_idx+60]!r}")
+    raw_encoded = extract_quoted_value(sc_text, 'preloadedState')
     if raw_encoded:
-        print(f"   Найден в сыром HTML, encoded длина={len(raw_encoded):,}")
+        print(f"   Extracted: {len(raw_encoded):,} chars")
+        break
+    else:
+        print(f"   extract_quoted_value вернул None — пробуем ';' split")
+        # Альтернатива: взять от первого " после = до ;
+        ps_idx2 = sc_text.find('preloadedState')
+        eq_idx = sc_text.find('=', ps_idx2)
+        q1 = sc_text.find('"', eq_idx)
+        q2 = sc_text.find('";', q1 + 1)
+        if q1 >= 0 and q2 > q1:
+            raw_encoded = sc_text[q1+1:q2]
+            print(f"   Split method: {len(raw_encoded):,} chars")
+            break
 
 if raw_encoded:
     decoded = unquote(raw_encoded)
@@ -411,18 +418,7 @@ if raw_encoded:
         out.write_text(decoded[:100000], encoding="utf-8", errors="ignore")
         print(f"   Декодированный текст (100KB) → recon_results/preloadedState_decoded.txt")
 else:
-    print("   window.preloadedState не найден")
-    # Показываем начало script[61] через BeautifulSoup (уже декодировано)
-    if len(scripts) > 61:
-        s61 = scripts[61].string or ""
-        print(f"   script[61] через BS (первые 400 chars): {s61[:400]!r}")
-    # Ищем любые переменные с preloaded/state в имени
-    for sc in scripts:
-        c = sc.string or ""
-        if 'preloaded' in c.lower() or 'initialState' in c.lower():
-            m2 = re.search(r'window\.(\w+)\s*=\s*["\']', c)
-            if m2:
-                print(f"   В скрипте найдено: window.{m2.group(1)}")
+    print("   window.preloadedState не найден нигде")
 
 print(f"\n{'='*60}")
 print("ГОТОВО. Проверь recon_results/")
