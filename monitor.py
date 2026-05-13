@@ -366,8 +366,10 @@ class Monitor:
 
             async def _enrich(lst):
                 async with sem:
-                    # Skip delay and fetch if XHR interception already gave us full data
-                    # Only sleep before Playwright detail fetch — skip if data already present
+                    # Skip detail fetch entirely for confirmed companies — filtered anyway
+                    if lst.get("seller_type") == "Компания":
+                        return lst
+                    # Skip delay if XHR interception already gave us full data
                     if not (lst.get("description") and lst.get("seller_name")):
                         await asyncio.sleep(random.uniform(1.5, 3.0) * self._delay_mult)
                     try:

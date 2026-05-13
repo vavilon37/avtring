@@ -967,6 +967,45 @@ class AvitoParser:
         date_el = item.find(attrs={"data-marker": "item-date"})
         date = date_el.get_text(strip=True) if date_el else ""
 
+        # --- Seller info from list page HTML (avoids most detail-page fetches) ---
+        seller_name = ""
+        seller_type = ""
+
+        # Find sellerInfo div by stable class prefix (suffix is a hash that changes with releases)
+        sel_div = item.find(lambda tag: tag.name == "div" and any(
+            "iva-item-sellerInfo" in c for c in (tag.get("class") or [])
+        ))
+        if sel_div:
+            # Walk children and collect text BEFORE the first data-marker element (rating/badge area)
+            parts = []
+            for child in sel_div.children:
+                if isinstance(child, NavigableString):
+                    t = str(child).strip()
+                    if t:
+                        parts.append(t)
+                else:
+                    if child.get("data-marker") or child.find(attrs={"data-marker": True}):
+                        break  # entering rating/badge area — stop
+                    t = child.get_text(strip=True)
+                    if t and not re.match(r'^[\d,\. ]+$', t):
+                        parts.append(t)
+            seller_name = " ".join(parts).strip()
+
+        # High review count = reseller/company (private sellers rarely have 30+ phone sales)
+        rev_el = item.find(attrs={"data-marker": "seller-info/summary"})
+        if rev_el:
+            m_rev = re.search(r'(\d+)', rev_el.get_text())
+            if m_rev and int(m_rev.group(1)) >= 30:
+                seller_type = "Компания"
+
+        # --- Specific params (storage size, colour, etc.) ---
+        params: dict = {}
+        params_el = item.find(attrs={"data-marker": "item-specific-params"})
+        if params_el:
+            p_text = params_el.get_text(strip=True)
+            if p_text:
+                params["Характеристики"] = p_text
+
         return {
             "id": str(item_id),
             "title": title,
@@ -976,9 +1015,9 @@ class AvitoParser:
             "location": location,
             "date": date,
             "description": "",
-            "seller_name": "",
-            "seller_type": "",
-            "params": {},
+            "seller_name": seller_name,
+            "seller_type": seller_type,
+            "params": params,
         }
 
     @staticmethod

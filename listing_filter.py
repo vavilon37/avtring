@@ -166,10 +166,12 @@ def _reseller_score(listing: dict) -> tuple[bool, str]:
         if len(short_lines) >= 8:
             return True, f"structured desc ({len(short_lines)} short lines)"
 
-    # 6. Seller name looks like a business (contains LLC patterns or long multi-word names)
+    # 6. Seller name looks like a business
     if seller_name:
         if re.search(r"\b(ооо|ип\b|зао|пао|ltd|llc|corp)\b", seller_name, re.IGNORECASE):
             return True, f"seller_name is company: {seller_name!r}"
+        if re.search(r"(маркет|market|shop\b|store\b|трейд|trade\b|ломбард|салон|студи[яи])", seller_name, re.IGNORECASE):
+            return True, f"seller_name contains store keyword: {seller_name!r}"
 
     return False, ""
 
