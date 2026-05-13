@@ -188,6 +188,9 @@ class AvitoParser:
         self._profile_idx: int = 0  # start with profile_0 (manually warmed by warmup.py)
         self._needs_warmup: bool = False
         self._curl_cookies: dict = {}  # cookies extracted from Playwright for curl_cffi
+        self._api_url: str | None = None          # captured list API endpoint
+        self._api_headers: dict = {}              # headers needed for API calls
+        self._last_intercepted: list[dict] = []   # listings from last XHR interception
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -428,6 +431,36 @@ class AvitoParser:
             if referer:
                 await page.set_extra_http_headers({"Referer": referer})
 
+            # Intercept JSON API responses (list pages only)
+            _captured: dict = {}
+            if wait_selector and "item" in wait_selector:
+                async def _on_response(resp):
+                    try:
+                        rurl = resp.url
+                        if "avito.ru" not in rurl:
+                            return
+                        ct = resp.headers.get("content-type", "")
+                        if "json" not in ct:
+                            return
+                        body = await resp.body()
+                        data = json.loads(body)
+                        if not isinstance(data, dict):
+                            return
+                        # Find items list in various Avito response shapes
+                        items = (
+                            data.get("items")
+                            or (data.get("result") or {}).get("items")
+                            or (data.get("catalog") or {}).get("items")
+                            or (data.get("data") or {}).get("items")
+                        )
+                        if isinstance(items, list) and len(items) >= 3:
+                            if len(items) > len(_captured.get("items", [])):
+                                _captured["url"] = rurl
+                                _captured["items"] = items
+                    except Exception:
+                        pass
+                page.on("response", _on_response)
+
             await asyncio.sleep(random.uniform(0.3, 1.2))
             try:
                 await asyncio.wait_for(
@@ -498,12 +531,161 @@ class AvitoParser:
             self._block_count = 0  # successful request — reset backoff
             html = await page.content()
             await self._extract_cookies()  # refresh curl_cffi cookies
+
+            # Process intercepted API data
+            if _captured:
+                self._api_url = _captured["url"]
+                parsed = self._parse_api_items(_captured["items"])
+                self._last_intercepted = parsed
+                logger.info(
+                    f"XHR intercepted: {len(parsed)} listings from {self._api_url[:80]}"
+                )
+                if _captured["items"]:
+                    logger.info(f"API item keys: {list(_captured['items'][0].keys())}")
+            else:
+                self._last_intercepted = []
+
             return html
         except Exception as e:
             logger.error(f"Page error {url}: {e}")
             return ""
         finally:
             await page.close()
+
+    @staticmethod
+    def _parse_api_items(items: list) -> list[dict]:
+        """Convert Avito internal API item dicts to our listing format."""
+        listings = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or item.get("itemId") or "")
+            if not item_id:
+                continue
+
+            title = item.get("title") or item.get("name") or ""
+
+            price_obj = item.get("price") or item.get("priceDetailed") or {}
+            if isinstance(price_obj, dict):
+                raw = price_obj.get("value") or price_obj.get("valueText") or "Цена не указана"
+                price_text = f"{int(raw):,} ₽".replace(",", "\xa0") if str(raw).isdigit() else str(raw)
+            elif isinstance(price_obj, (int, float)):
+                price_text = f"{int(price_obj):,} ₽".replace(",", "\xa0")
+            else:
+                price_text = str(price_obj) if price_obj else "Цена не указана"
+
+            url_path = item.get("url") or item.get("urlPath") or ""
+            link = f"https://www.avito.ru{url_path}" if url_path.startswith("/") else url_path
+
+            images = []
+            for key in ("images", "photos", "image"):
+                val = item.get(key)
+                if isinstance(val, list):
+                    for img in val[:8]:
+                        src = img if isinstance(img, str) else (img.get("url") or img.get("src") or img.get("640x480") or "")
+                        if src:
+                            images.append(src)
+                    break
+                elif isinstance(val, dict):
+                    src = val.get("url") or val.get("src") or ""
+                    if src:
+                        images.append(src)
+                    break
+
+            geo = item.get("geo") or item.get("location") or {}
+            location = (geo.get("name") or geo.get("city") or "") if isinstance(geo, dict) else str(geo or "")
+
+            date_raw = item.get("time") or item.get("sortTime") or item.get("closingAt") or ""
+            if isinstance(date_raw, (int, float)) and date_raw > 1_000_000:
+                from datetime import datetime, timezone as tz
+                date_str = datetime.fromtimestamp(date_raw, tz=tz.utc).strftime(
+                    "%a, %d %b %Y %H:%M:%S +0000"
+                )
+            else:
+                date_str = str(date_raw) if date_raw else ""
+
+            desc = item.get("description") or item.get("body") or ""
+
+            seller = item.get("seller") or item.get("user") or {}
+            if isinstance(seller, dict):
+                seller_name = seller.get("name") or seller.get("displayName") or ""
+                seller_type = seller.get("type") or seller.get("accountType") or ""
+            else:
+                seller_name = seller_type = ""
+
+            params = {}
+            for key in ("params", "attributes", "characteristics"):
+                val = item.get(key)
+                if isinstance(val, list):
+                    for p in val:
+                        if isinstance(p, dict):
+                            k = p.get("title") or p.get("name") or ""
+                            v = p.get("value") or p.get("values") or ""
+                            if isinstance(v, list):
+                                v = ", ".join(str(x) for x in v)
+                            if k and v:
+                                params[k] = str(v)
+                    break
+                elif isinstance(val, dict):
+                    params = {k: str(v) for k, v in val.items() if v}
+                    break
+
+            listings.append({
+                "id": item_id,
+                "title": title,
+                "price": price_text,
+                "link": link,
+                "images": images,
+                "location": location,
+                "date": date_str,
+                "description": desc[:800] if desc else "",
+                "seller_name": seller_name,
+                "seller_type": seller_type,
+                "params": params,
+            })
+        return listings
+
+    async def _fetch_api(self, search_url: str) -> list[dict]:
+        """Call the captured Avito XHR endpoint directly via cffi."""
+        if not self._api_url or not _HAS_CURL_CFFI or not self._curl_cookies:
+            return []
+        if time.time() < self._blocked_until:
+            return []
+        try:
+            async with _CurlSession(impersonate="chrome131") as session:
+                r = await session.get(
+                    self._api_url,
+                    headers={
+                        **_CFFI_HEADERS,
+                        "accept": "application/json, text/plain, */*",
+                        "sec-fetch-dest": "empty",
+                        "sec-fetch-mode": "cors",
+                        "sec-fetch-site": "same-origin",
+                        "referer": search_url,
+                    },
+                    cookies=self._curl_cookies,
+                    timeout=10,
+                )
+            if r.status_code == 200 and "json" in r.headers.get("content-type", ""):
+                data = r.json()
+                items = (
+                    data.get("items")
+                    or (data.get("result") or {}).get("items")
+                    or (data.get("catalog") or {}).get("items")
+                    or (data.get("data") or {}).get("items")
+                )
+                if isinstance(items, list) and items:
+                    listings = self._parse_api_items(items)
+                    logger.info(f"API cffi: {len(listings)} listings (no browser!)")
+                    return listings
+            elif r.status_code in (401, 403, 404):
+                logger.info(f"API cffi: HTTP {r.status_code} — clearing cached endpoint")
+                self._api_url = None
+            else:
+                logger.info(f"API cffi: HTTP {r.status_code}")
+        except Exception as e:
+            logger.info(f"API cffi error: {e}")
+        return []
 
     @staticmethod
     def _to_rss_url(search_url: str) -> str:
@@ -592,7 +774,20 @@ class AvitoParser:
         return listings
 
     async def fetch_listings(self, url: str) -> list[dict]:
+        # Fast path: cffi → captured API endpoint (no browser, ~200ms)
+        if self._api_url:
+            listings = await self._fetch_api(url)
+            if listings:
+                return listings
+
+        # Playwright: loads page, intercepts XHR, discovers/refreshes API endpoint
         html = await self._get_html(url, wait_selector='[data-marker="item"]', playwright_only=True)
+
+        # Prefer intercepted API data over HTML parsing (richer, has seller/params)
+        if self._last_intercepted:
+            logger.info(f"Using intercepted API data ({len(self._last_intercepted)} listings)")
+            return self._last_intercepted
+
         if not html:
             return []
         return self._parse_list_html(html, url)
