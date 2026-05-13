@@ -185,7 +185,7 @@ class AvitoParser:
         self._request_count: int = 0
         self._rotate_at: int = random.randint(25, 40)
         self._context_lock = asyncio.Lock()
-        self._profile_idx: int = random.randint(0, len(PROFILE_DIRS) - 1)
+        self._profile_idx: int = 0  # start with profile_0 (manually warmed by warmup.py)
         self._needs_warmup: bool = False
         self._curl_cookies: dict = {}  # cookies extracted from Playwright for curl_cffi
 
