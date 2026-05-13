@@ -394,10 +394,17 @@ class Monitor:
             found_any = False
             for watch in watchers:
                 label = watch["label"] or f"Поиск #{watch['id']}"
-                watch_listings = [
+                enriched_listings = [
                     detailed_by_id.get(l["id"], l) for l in per_watch[watch["id"]]
                 ]
-                watch_listings = filter_after_detail(watch_listings)
+                watch_listings = filter_after_detail(enriched_listings)
+
+                # Mark reseller-rejected listings as seen so they aren't re-fetched next cycle
+                passed_ids = {l["id"] for l in watch_listings}
+                rejected = [l for l in enriched_listings
+                            if l["id"] not in passed_ids and not l.get("_detail_failed")]
+                if rejected:
+                    await mark_listings_seen(watch["id"], [l["id"] for l in rejected])
 
                 target_gb = watch.get("storage_gb", 0)
                 if target_gb:

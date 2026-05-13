@@ -418,6 +418,7 @@ class AvitoParser:
             if self._request_count >= self._rotate_at:
                 logger.info(f"Rotating browser context after {self._request_count} requests")
                 await self._new_context()
+                self._needs_warmup = True  # warm up the fresh profile before real requests
             context = self._context
 
         page = await context.new_page()
