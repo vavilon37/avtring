@@ -20,8 +20,6 @@ MIN_PAID_URL_INTERVAL = 10.0  # seconds between re-checks of the same URL
 logger = logging.getLogger(__name__)
 
 
-EMPTY_PARAMS_THRESHOLD = 999  # disabled — params are empty by design with RSS/cffi parsing
-
 class Monitor:
     def __init__(self, bot: Bot):
         self.bot = bot
@@ -31,8 +29,6 @@ class Monitor:
         self._parsers_started = [False]
         self._running = False
         self._task: asyncio.Task | None = None
-        self._empty_params_streak: int = 0
-        self._empty_params_alerted: bool = False
         self._block_alerted: bool = False
         self._last_cleanup: float = 0
         self._start_time: float = 0.0
@@ -73,21 +69,6 @@ class Monitor:
                 )
             except Exception:
                 pass
-
-    async def _notify_empty_params(self):
-        try:
-            await self.bot.send_message(
-                chat_id=OWNER_ID,
-                text=(
-                    "⚠️ <b>Авито изменил разметку страницы</b>\n\n"
-                    f"Последние {EMPTY_PARAMS_THRESHOLD} объявлений пришли без характеристик "
-                    "(экран, корпус, память и т.д.).\n\n"
-                    "Скорее всего Авито обновил HTML — нужно проверить парсер."
-                ),
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send empty params notification: {e}")
 
     async def _notify_recovered(self):
         try:
@@ -412,16 +393,6 @@ class Monitor:
                     if listing.get("_detail_failed"):
                         logger.info(f"[skip] detail failed for {listing.get('id')} — will retry next cycle")
                         continue
-
-                    if not listing.get("params"):
-                        self._empty_params_streak += 1
-                        if (self._empty_params_streak >= EMPTY_PARAMS_THRESHOLD
-                                and not self._empty_params_alerted):
-                            self._empty_params_alerted = True
-                            await self._notify_empty_params()
-                    else:
-                        self._empty_params_streak = 0
-                        self._empty_params_alerted = False
 
                     user_sent = self._tick_sent.setdefault(watch["user_id"], set())
                     if listing["id"] in user_sent:

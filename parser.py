@@ -4,7 +4,6 @@ import re
 import random
 import logging
 import time
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse, urlencode, parse_qs
 from bs4 import BeautifulSoup, NavigableString
@@ -188,8 +187,7 @@ class AvitoParser:
         self._profile_idx: int = 0  # start with profile_0 (manually warmed by warmup.py)
         self._needs_warmup: bool = False
         self._curl_cookies: dict = {}  # cookies extracted from Playwright for curl_cffi
-        self._api_url: str | None = None          # captured list API endpoint
-        self._api_headers: dict = {}              # headers needed for API calls
+        self._api_urls: dict[str, str] = {}        # url_base_key -> captured API endpoint
         self._last_intercepted: list[dict] = []   # listings from last XHR interception
 
     async def start(self):
@@ -202,6 +200,7 @@ class AvitoParser:
         if self._context:
             await self._context.close()
         self._curl_cookies = {}  # old profile cookies are invalid
+        self._api_urls = {}
 
         profile = PROFILE_DIRS[self._profile_idx % len(PROFILE_DIRS)]
         self._profile_idx += 1
@@ -273,6 +272,15 @@ class AvitoParser:
             logger.info(f"curl_cffi: saved {len(self._curl_cookies)} cookies")
         except Exception as e:
             logger.info(f"cookie extract failed: {e}")
+
+    @staticmethod
+    def _url_base_key(url: str) -> str:
+        """Stable key for a search URL — strips page/sort params so the same search
+        on different pages maps to one cached API endpoint."""
+        p = urlparse(url)
+        qs = {k: v[0] for k, v in parse_qs(p.query).items()
+              if k not in ("p", "page", "sort", "view", "s")}
+        return urlunparse(p._replace(query=urlencode(sorted(qs.items())) if qs else ""))
 
     async def _cffi_get(self, url: str, referer: str = "") -> str:
         """Chrome-impersonating HTTP fetch via curl_cffi. No browser needed.
@@ -434,6 +442,14 @@ class AvitoParser:
             # Intercept JSON API responses (list pages only)
             _captured: dict = {}
             if wait_selector and "item" in wait_selector:
+                def _api_score(rurl: str) -> int:
+                    score = 0
+                    if "/web/" in rurl:    score += 3
+                    if "items" in rurl:   score += 2
+                    if "catalog" in rurl: score += 2
+                    if "/api/" in rurl:   score += 1
+                    return score
+
                 async def _on_response(resp):
                     try:
                         rurl = resp.url
@@ -446,7 +462,6 @@ class AvitoParser:
                         data = json.loads(body)
                         if not isinstance(data, dict):
                             return
-                        # Find items list in various Avito response shapes
                         items = (
                             data.get("items")
                             or (data.get("result") or {}).get("items")
@@ -454,7 +469,10 @@ class AvitoParser:
                             or (data.get("data") or {}).get("items")
                         )
                         if isinstance(items, list) and len(items) >= 3:
-                            if len(items) > len(_captured.get("items", [])):
+                            new_score = (_api_score(rurl), len(items))
+                            old_score = (_api_score(_captured.get("url", "")),
+                                         len(_captured.get("items", [])))
+                            if new_score >= old_score:
                                 _captured["url"] = rurl
                                 _captured["items"] = items
                     except Exception:
@@ -534,11 +552,12 @@ class AvitoParser:
 
             # Process intercepted API data
             if _captured:
-                self._api_url = _captured["url"]
+                api_url = _captured["url"]
+                self._api_urls[self._url_base_key(url)] = api_url
                 parsed = self._parse_api_items(_captured["items"])
                 self._last_intercepted = parsed
                 logger.info(
-                    f"XHR intercepted: {len(parsed)} listings from {self._api_url[:80]}"
+                    f"XHR intercepted: {len(parsed)} listings from {api_url[:80]}"
                 )
                 if _captured["items"]:
                     logger.info(f"API item keys: {list(_captured['items'][0].keys())}")
@@ -645,16 +664,18 @@ class AvitoParser:
             })
         return listings
 
-    async def _fetch_api(self, search_url: str) -> list[dict]:
-        """Call the captured Avito XHR endpoint directly via cffi."""
-        if not self._api_url or not _HAS_CURL_CFFI or not self._curl_cookies:
+    async def _fetch_api(self, api_url: str, search_url: str) -> list[dict] | None:
+        """Call a captured Avito XHR endpoint via cffi.
+        Returns None when the URL is invalid (401/403/404) — caller removes it from the cache.
+        Returns [] on temporary/network error."""
+        if not _HAS_CURL_CFFI or not self._curl_cookies:
             return []
         if time.time() < self._blocked_until:
             return []
         try:
             async with _CurlSession(impersonate="chrome131") as session:
                 r = await session.get(
-                    self._api_url,
+                    api_url,
                     headers={
                         **_CFFI_HEADERS,
                         "accept": "application/json, text/plain, */*",
@@ -679,99 +700,13 @@ class AvitoParser:
                     logger.info(f"API cffi: {len(listings)} listings (no browser!)")
                     return listings
             elif r.status_code in (401, 403, 404):
-                logger.info(f"API cffi: HTTP {r.status_code} — clearing cached endpoint")
-                self._api_url = None
+                logger.info(f"API cffi: HTTP {r.status_code} — URL invalidated")
+                return None
             else:
                 logger.info(f"API cffi: HTTP {r.status_code}")
         except Exception as e:
             logger.info(f"API cffi error: {e}")
         return []
-
-    @staticmethod
-    def _to_rss_url(search_url: str) -> str:
-        p = urlparse(search_url)
-        rss_path = p.path.rstrip("/") + ".rss"
-        kept = {k: v[0] for k, v in parse_qs(p.query).items()
-                if k in ("q", "pmax", "pmin", "seller_type", "user", "companyId")}
-        return urlunparse(p._replace(path=rss_path, query=urlencode(kept) if kept else ""))
-
-    async def _fetch_rss(self, search_url: str) -> list[dict]:
-        # Avito RSS requires a logged-in session — returns HTML for guests.
-        # Disabled to avoid wasting time on guaranteed-empty requests.
-        return []
-
-    @staticmethod
-    def _parse_rss(xml_text: str) -> list[dict]:
-        # Strip ALL XML 1.0 invalid code points before parsing
-        clean = re.sub(
-            r'[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]',
-            '', xml_text,
-        )
-        # BeautifulSoup + lxml-xml handles malformed RSS via lxml recovery mode
-        try:
-            soup = BeautifulSoup(clean, "lxml-xml")
-        except Exception as e:
-            logger.warning(f"RSS parse error: {e}")
-            return []
-
-        items = soup.find_all("item")
-        if not items:
-            logger.info(f"RSS: no <item> in soup; tags={[t.name for t in soup.find_all(True)][:20]}")
-            return []
-
-        listings = []
-        for item in items:
-            def _t(tag: str) -> str:
-                el = item.find(tag)
-                return el.get_text(strip=True) if el else ""
-
-            link = _t("link")
-            if not link:
-                continue
-            m = re.search(r"_(\d{6,})(?:\?|$|/)", link)
-            if not m:
-                continue
-            item_id = m.group(1)
-
-            price_el = item.find("price")
-            price_text = price_el.get_text(strip=True) if price_el else ""
-            if price_text.isdigit():
-                price_text = f"{int(price_text):,} \u20bd".replace(",", "\xa0")
-            elif not price_text:
-                price_text = "\u0426\u0435\u043d\u0430 \u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u0430"
-
-            loc_el = item.find("location")
-            location = loc_el.get_text(strip=True) if loc_el else ""
-
-            img = ""
-            enc = item.find("enclosure")
-            if enc:
-                img = enc.get("url", "")
-            if not img:
-                img_el = item.find("images")
-                if img_el:
-                    first_img = img_el.find("image")
-                    if first_img:
-                        img = first_img.get_text(strip=True)
-
-            desc_raw = _t("description")
-            desc = re.sub(r'<[^>]+>', ' ', desc_raw).strip()
-            desc = re.sub(r'\s+', ' ', desc)[:800]
-
-            listings.append({
-                "id": item_id,
-                "title": _t("title"),
-                "price": price_text,
-                "link": link,
-                "images": [img] if img else [],
-                "location": location,
-                "date": _t("pubDate"),
-                "description": desc,
-                "seller_name": "",
-                "seller_type": "",
-                "params": {},
-            })
-        return listings
 
     @staticmethod
     def _extract_next_data(html: str) -> dict | None:
@@ -855,10 +790,14 @@ class AvitoParser:
 
     async def fetch_listings(self, url: str) -> list[dict]:
         # Fast path: cffi → captured API endpoint (no browser, ~200ms)
-        if self._api_url:
-            listings = await self._fetch_api(url)
-            if listings:
-                return listings
+        base_key = self._url_base_key(url)
+        api_url = self._api_urls.get(base_key)
+        if api_url:
+            result = await self._fetch_api(api_url, url)
+            if result is None:
+                del self._api_urls[base_key]  # URL invalidated (401/403/404)
+            elif result:
+                return result
 
         # Playwright: loads page, intercepts XHR, discovers/refreshes API endpoint
         html = await self._get_html(url, wait_selector='[data-marker="item"]', playwright_only=True)
@@ -1019,25 +958,6 @@ class AvitoParser:
             "seller_type": seller_type,
             "params": params,
         }
-
-    @staticmethod
-    def _extract_element_value(el) -> str:
-        # 1. Plain text content
-        text = el.get_text(strip=True)
-        if text:
-            return text
-        # 2. Avito condition ratings: value in aria-label, title, or data-* on children
-        for child in el.find_all(True):
-            for attr in ("aria-label", "title", "data-value", "data-rating", "data-label", "content"):
-                v = child.get(attr, "")
-                if v and v.strip():
-                    return v.strip()
-        # 3. Try the element's own attributes
-        for attr in ("aria-label", "title", "data-value", "content"):
-            v = el.get(attr, "")
-            if v and v.strip():
-                return v.strip()
-        return ""
 
     def _parse_detail_html(self, html: str, base: dict) -> dict:
         soup = BeautifulSoup(html, "lxml")
