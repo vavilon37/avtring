@@ -369,8 +369,8 @@ class Monitor:
                     await asyncio.sleep(random.uniform(0.8, 2.0) * self._delay_mult)
                     try:
                         enriched = await parser.fetch_listing_detail(lst)
-                        # Tag as failed if detail page returned no data
-                        if not enriched.get("description") and not enriched.get("params") and not enriched.get("seller_name"):
+                        # Only skip if HTTP fetch itself failed (not if parsing gave partial data)
+                        if enriched.get("_fetch_failed"):
                             enriched["_detail_failed"] = True
                         return enriched
                     except Exception as e:

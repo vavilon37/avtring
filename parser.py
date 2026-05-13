@@ -1,4 +1,5 @@
 import asyncio
+import json
 import random
 import logging
 import time
@@ -517,10 +518,9 @@ class AvitoParser:
             clean_url,
             referer="https://www.avito.ru/",
             wait_selector='[data-marker="item-view/title-info"]',
-            playwright_only=True,  # detail pages need JS-rendered DOM for params/description
         )
         if not html:
-            return listing
+            return {**listing, "_fetch_failed": True}
         return self._parse_detail_html(html, listing)
 
     def _parse_list_html(self, html: str, base_url: str) -> list[dict]:
@@ -655,5 +655,34 @@ class AvitoParser:
         date_el = soup.find(attrs={"data-marker": "item-view/item-date"})
         if date_el:
             result["date"] = date_el.get_text(strip=True)
+
+        # Fallback: JSON-LD structured data (always present in Avito SSR HTML)
+        # Fills description + seller info when data-markers are JS-rendered only
+        if not result.get("description") or not result.get("seller_name"):
+            for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+                try:
+                    data = json.loads(script.string or "")
+                    if not isinstance(data, dict):
+                        continue
+                    if not result.get("description"):
+                        desc = data.get("description") or ""
+                        if desc:
+                            result["description"] = desc[:800]
+                    offers = data.get("offers") or {}
+                    seller = offers.get("seller") or {}
+                    if not result.get("seller_name") and seller.get("name"):
+                        result["seller_name"] = seller["name"]
+                    if not result.get("seller_type"):
+                        stype = seller.get("@type", "")
+                        if stype == "Person":
+                            result["seller_type"] = "Частное лицо"
+                        elif stype in ("Organization", "LocalBusiness"):
+                            result["seller_type"] = "Компания"
+                except Exception:
+                    pass
+
+        if not result.get("description") and not result.get("seller_name"):
+            markers = [t.get("data-marker") for t in soup.find_all(attrs={"data-marker": True})]
+            logger.info(f"[detail] no data in {len(html)}-char page. markers={markers[:15]}")
 
         return result
