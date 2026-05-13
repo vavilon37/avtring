@@ -524,7 +524,9 @@ class AvitoParser:
                         "accept": "application/rss+xml,application/xml,text/xml,*/*;q=0.8",
                         "user-agent": _CFFI_HEADERS["user-agent"],
                         "accept-language": _CFFI_HEADERS["accept-language"],
+                        "referer": "https://www.avito.ru/",
                     },
+                    cookies=self._curl_cookies,
                     timeout=15,
                     allow_redirects=True,
                 )
@@ -598,11 +600,20 @@ class AvitoParser:
         return listings
 
     async def fetch_listings(self, url: str) -> list[dict]:
-        # Try RSS first — no browser, no detection, pure HTTP
+        # Warmup first so cookies are available for RSS (cf_clearance needed)
+        if self._needs_warmup:
+            self._needs_warmup = False
+            try:
+                await self._warmup()
+            except Exception as e:
+                logger.warning(f"Warmup failed: {e}")
+
+        # Try RSS with session cookies — no browser, no detection
         listings = await self._fetch_rss(url)
         if listings:
             return listings
-        # Fallback: Playwright (JS-rendered DOM with data-markers)
+
+        # Fallback: Playwright (already warmed up, _needs_warmup already False)
         logger.info("RSS returned 0 — falling back to Playwright for list page")
         html = await self._get_html(url, wait_selector='[data-marker="item"]', playwright_only=True)
         if not html:
