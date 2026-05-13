@@ -27,10 +27,8 @@ class Monitor:
         self.bot = bot
         self._parsers = [
             AvitoParser(on_blocked=self._notify_blocked),
-            AvitoParser(on_blocked=self._notify_blocked),
         ]
-        self._parsers[1]._profile_idx = 3  # separate profile set from parser 0
-        self._parsers_started = [False, False]
+        self._parsers_started = [False]
         self._running = False
         self._task: asyncio.Task | None = None
         self._empty_params_streak: int = 0
@@ -293,39 +291,19 @@ class Monitor:
                 f"Checking {len(paid_watches)} paid watches "
                 f"→ {len(url_groups)} unique URLs"
             )
-
-            half = (len(shuffled) + 1) // 2
-            parser_groups = [shuffled[:half], shuffled[half:]]
-
-            async def _run_paid(parser, url_group):
-                found = False
-                processed = 0
-                for url, watchers in url_group:
-                    last_checked = self._url_last_checked.get(url, 0)
-                    if now - last_checked < MIN_PAID_URL_INTERVAL:
-                        logger.debug(f"Skip {url[:50]} — checked {now - last_checked:.0f}s ago")
-                        continue
-                    if processed > 0:
-                        await asyncio.sleep(random.uniform(2.0, 5.0) * self._delay_mult)
-                    self._url_last_checked[url] = now
-                    processed += 1
-                    if await self._check_url_group(url, watchers, parser):
-                        found = True
-                return found
-
-            async def _safe_run(coro, label: str) -> bool:
-                try:
-                    return await asyncio.wait_for(coro, timeout=150.0)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Parser group '{label}' timed out after 150s, skipping")
-                    return False
-
-            results = await asyncio.gather(
-                _safe_run(_run_paid(self._parsers[0], parser_groups[0]), "parser-0"),
-                _safe_run(_run_paid(self._parsers[1], parser_groups[1]), "parser-1"),
-            )
-            if any(results):
-                found_any = True
+            parser = self._parsers[0]
+            processed = 0
+            for url, watchers in shuffled:
+                last_checked = self._url_last_checked.get(url, 0)
+                if now - last_checked < MIN_PAID_URL_INTERVAL:
+                    logger.debug(f"Skip {url[:50]} — checked {now - last_checked:.0f}s ago")
+                    continue
+                if processed > 0:
+                    await asyncio.sleep(random.uniform(1.0, 3.0) * self._delay_mult)
+                self._url_last_checked[url] = now
+                processed += 1
+                if await self._check_url_group(url, watchers, parser):
+                    found_any = True
 
         if free_watches:
             last = getattr(self, "_last_free_check", 0)
