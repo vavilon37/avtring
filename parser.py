@@ -544,10 +544,23 @@ class AvitoParser:
     @staticmethod
     def _parse_rss(xml_text: str) -> list[dict]:
         NS = "http://www.avito.ru/rss"
+        # Strip XML-invalid control chars (keep \t \n \r)
+        clean = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', xml_text)
+        root = None
         try:
-            root = ET.fromstring(xml_text)
+            root = ET.fromstring(clean)
         except ET.ParseError as e:
-            logger.warning(f"RSS XML parse error: {e}")
+            logger.warning(f"RSS ET parse error: {e} — trying lxml recovery")
+            try:
+                import lxml.etree as lET
+                root = lET.fromstring(
+                    clean.encode("utf-8", errors="replace"),
+                    parser=lET.XMLParser(recover=True),
+                )
+            except Exception as e2:
+                logger.warning(f"RSS lxml recovery failed: {e2}")
+                return []
+        if root is None:
             return []
         listings = []
         for item in root.findall(".//item"):
@@ -584,6 +597,10 @@ class AvitoParser:
                     if first_img is not None:
                         img = (first_img.text or "").strip()
 
+            desc_raw = _t("description")
+            desc = re.sub(r'<[^>]+>', ' ', desc_raw).strip()
+            desc = re.sub(r'\s+', ' ', desc)[:800]
+
             listings.append({
                 "id": item_id,
                 "title": _t("title"),
@@ -592,7 +609,7 @@ class AvitoParser:
                 "images": [img] if img else [],
                 "location": location,
                 "date": _t("pubDate"),
-                "description": _t("description"),
+                "description": desc,
                 "seller_name": "",
                 "seller_type": "",
                 "params": {},
@@ -626,10 +643,24 @@ class AvitoParser:
             return listing
         parsed = urlparse(url)
         clean_url = urlunparse(parsed._replace(query="", fragment=""))
+
+        # cffi fast path — Avito detail pages are JS-rendered (React CSR).
+        # cffi fetches SSR HTML which has no item content (only nav/footer).
+        # Detect empty content and fall back to Playwright automatically.
+        if _HAS_CURL_CFFI and self._curl_cookies and time.time() >= self._blocked_until:
+            html = await self._cffi_get(clean_url, referer="https://www.avito.ru/")
+            if html:
+                result = self._parse_detail_html(html, listing)
+                if result.get("description") or result.get("seller_name"):
+                    return result
+                logger.info(f"cffi detail: SSR-only page, no content — falling back to Playwright")
+
+        # Playwright: waits for JS hydration, gets full item data
         html = await self._get_html(
             clean_url,
             referer="https://www.avito.ru/",
             wait_selector='[data-marker="item-view/title-info"]',
+            playwright_only=True,
         )
         if not html:
             return {**listing, "_fetch_failed": True}

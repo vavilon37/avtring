@@ -13,7 +13,7 @@ from parser import AvitoParser, BLOCK_COOLDOWNS
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime, storage_matches
 
-MAX_DETAIL_FETCH = 5    # max detail pages per cycle
+MAX_DETAIL_FETCH = 2    # max detail pages per cycle (Playwright — keep low)
 DETAIL_CONCURRENCY = 1  # sequential detail fetches — less suspicious
 MIN_PAID_URL_INTERVAL = 90.0  # seconds between re-checks of the same URL
 
@@ -366,7 +366,7 @@ class Monitor:
 
             async def _enrich(lst):
                 async with sem:
-                    await asyncio.sleep(random.uniform(0.8, 2.0) * self._delay_mult)
+                    await asyncio.sleep(random.uniform(5.0, 12.0) * self._delay_mult)
                     try:
                         enriched = await parser.fetch_listing_detail(lst)
                         # Only skip if HTTP fetch itself failed (not if parsing gave partial data)
