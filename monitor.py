@@ -13,9 +13,9 @@ from parser import AvitoParser, BLOCK_COOLDOWNS
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime, storage_matches
 
-MAX_DETAIL_FETCH = 2    # max detail pages per cycle (Playwright — keep low)
+MAX_DETAIL_FETCH = 1    # max detail pages per cycle (usually 0 when XHR data present)
 DETAIL_CONCURRENCY = 1  # sequential detail fetches — less suspicious
-MIN_PAID_URL_INTERVAL = 30.0  # seconds between re-checks of the same URL
+MIN_PAID_URL_INTERVAL = 10.0  # seconds between re-checks of the same URL
 
 logger = logging.getLogger(__name__)
 
@@ -193,20 +193,9 @@ class Monitor:
     async def _loop(self):
         await asyncio.sleep(3)
         no_result_streak = 0
-        _ticks_since_break = 0
-        _next_break_at = random.randint(8, 18)  # take first break after 8-18 ticks
         while self._running:
             now = asyncio.get_event_loop().time()
             real_now = time.time()
-
-            # Random human-like pause (simulates stepping away from computer)
-            _ticks_since_break += 1
-            if _ticks_since_break >= _next_break_at:
-                _ticks_since_break = 0
-                _next_break_at = random.randint(8, 18)
-                pause = random.uniform(30, 120)
-                logger.info(f"Human pause: {pause:.0f}s")
-                await asyncio.sleep(pause)
 
             if now - self._last_cleanup > 86400:
                 self._last_cleanup = now
@@ -377,7 +366,10 @@ class Monitor:
 
             async def _enrich(lst):
                 async with sem:
-                    await asyncio.sleep(random.uniform(5.0, 12.0) * self._delay_mult)
+                    # Skip delay and fetch if XHR interception already gave us full data
+                    # Only sleep before Playwright detail fetch — skip if data already present
+                    if not (lst.get("description") and lst.get("seller_name")):
+                        await asyncio.sleep(random.uniform(1.5, 3.0) * self._delay_mult)
                     try:
                         enriched = await parser.fetch_listing_detail(lst)
                         # Only skip if HTTP fetch itself failed (not if parsing gave partial data)

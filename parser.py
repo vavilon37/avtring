@@ -183,7 +183,7 @@ class AvitoParser:
         self._block_count: int = 0
         self._on_blocked = on_blocked
         self._request_count: int = 0
-        self._rotate_at: int = random.randint(25, 40)
+        self._rotate_at: int = random.randint(500, 1000)
         self._context_lock = asyncio.Lock()
         self._profile_idx: int = 0  # start with profile_0 (manually warmed by warmup.py)
         self._needs_warmup: bool = False
@@ -250,7 +250,7 @@ class AvitoParser:
         for page in self._context.pages[1:]:
             await page.close()
 
-        self._rotate_at = self._request_count + random.randint(25, 40)
+        self._rotate_at = self._request_count + random.randint(500, 1000)
         logger.info(
             f"New browser context: profile={Path(profile).name}, "
             f"UA={ua[:40]}... WebGL={webgl_vendor}, next rotate at req {self._rotate_at}"
@@ -773,6 +773,86 @@ class AvitoParser:
             })
         return listings
 
+    @staticmethod
+    def _extract_next_data(html: str) -> dict | None:
+        """Extract Next.js __NEXT_DATA__ JSON embedded in the page."""
+        m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except Exception:
+                pass
+        return None
+
+    @staticmethod
+    def _listings_from_next_data(data: dict) -> list[dict]:
+        """Try to extract listing items from Next.js page data."""
+        if not isinstance(data, dict):
+            return []
+        candidates = [
+            (data.get("props") or {}).get("pageProps") or {},
+        ]
+        # also try one level deeper
+        pp = (data.get("props") or {}).get("pageProps") or {}
+        for sub in ("initialState", "data", "catalog"):
+            if isinstance(pp.get(sub), dict):
+                candidates.append(pp[sub])
+        for c in candidates:
+            if not isinstance(c, dict):
+                continue
+            items = (
+                (c.get("catalog") or {}).get("items")
+                or c.get("items")
+                or (c.get("result") or {}).get("items")
+                or (c.get("data") or {}).get("items")
+            )
+            if isinstance(items, list) and len(items) >= 2:
+                return AvitoParser._parse_api_items(items)
+        return []
+
+    @staticmethod
+    def _detail_from_next_data(data: dict) -> dict:
+        """Extract detail-page fields (description, seller, params) from __NEXT_DATA__."""
+        result: dict = {}
+        if not isinstance(data, dict):
+            return result
+        pp = (data.get("props") or {}).get("pageProps") or {}
+        item = (
+            pp.get("item")
+            or (pp.get("initialState") or {}).get("item")
+            or (pp.get("data") or {}).get("item")
+        )
+        if not isinstance(item, dict):
+            return result
+        desc = item.get("description") or item.get("body") or ""
+        if desc:
+            result["description"] = str(desc)[:800]
+        seller = item.get("seller") or item.get("user") or {}
+        if isinstance(seller, dict):
+            if seller.get("name") or seller.get("displayName"):
+                result["seller_name"] = seller.get("name") or seller.get("displayName") or ""
+            if seller.get("type") or seller.get("accountType"):
+                result["seller_type"] = seller.get("type") or seller.get("accountType") or ""
+        params: dict = {}
+        for key in ("params", "attributes", "characteristics"):
+            val = item.get(key)
+            if isinstance(val, list):
+                for p in val:
+                    if isinstance(p, dict):
+                        k = p.get("title") or p.get("name") or ""
+                        v = p.get("value") or p.get("values") or ""
+                        if isinstance(v, list):
+                            v = ", ".join(str(x) for x in v)
+                        if k and v:
+                            params[k] = str(v)
+                break
+            elif isinstance(val, dict):
+                params = {str(k): str(v) for k, v in val.items() if v}
+                break
+        if params:
+            result["params"] = params
+        return result
+
     async def fetch_listings(self, url: str) -> list[dict]:
         # Fast path: cffi → captured API endpoint (no browser, ~200ms)
         if self._api_url:
@@ -790,12 +870,27 @@ class AvitoParser:
 
         if not html:
             return []
+
+        # Try __NEXT_DATA__ embedded state before falling back to HTML scraping
+        nd = self._extract_next_data(html)
+        if nd:
+            listings = self._listings_from_next_data(nd)
+            if listings:
+                logger.info(f"__NEXT_DATA__: {len(listings)} listings extracted")
+                return listings
+
         return self._parse_list_html(html, url)
 
     async def fetch_listing_detail(self, listing: dict) -> dict:
         url = listing["link"]
         if not url:
             return listing
+
+        # Skip detail fetch when XHR interception already gave us full data
+        if listing.get("description") and listing.get("seller_name"):
+            logger.debug(f"Detail skip: data already present for id={listing.get('id')!r}")
+            return listing
+
         parsed = urlparse(url)
         clean_url = urlunparse(parsed._replace(query="", fragment=""))
 
@@ -989,6 +1084,22 @@ class AvitoParser:
                             result["seller_type"] = "Компания"
                 except Exception:
                     pass
+
+        # Try __NEXT_DATA__ — may contain description/seller/params not in data-markers
+        if not result.get("description") or not result.get("seller_name") or not result.get("params"):
+            nd = self._extract_next_data(html)
+            if nd:
+                nd_detail = self._detail_from_next_data(nd)
+                if nd_detail.get("description") and not result.get("description"):
+                    result["description"] = nd_detail["description"]
+                if nd_detail.get("seller_name") and not result.get("seller_name"):
+                    result["seller_name"] = nd_detail["seller_name"]
+                if nd_detail.get("seller_type") and not result.get("seller_type"):
+                    result["seller_type"] = nd_detail["seller_type"]
+                if nd_detail.get("params") and not result.get("params"):
+                    result["params"] = nd_detail["params"]
+                if nd_detail:
+                    logger.debug(f"[detail] __NEXT_DATA__ enriched: {list(nd_detail.keys())}")
 
         if not result.get("description") and not result.get("seller_name"):
             markers = [t.get("data-marker") for t in soup.find_all(attrs={"data-marker": True})]
