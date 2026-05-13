@@ -193,9 +193,20 @@ class Monitor:
     async def _loop(self):
         await asyncio.sleep(3)
         no_result_streak = 0
+        _ticks_since_break = 0
+        _next_break_at = random.randint(8, 18)  # take first break after 8-18 ticks
         while self._running:
             now = asyncio.get_event_loop().time()
             real_now = time.time()
+
+            # Random human-like pause (simulates stepping away from computer)
+            _ticks_since_break += 1
+            if _ticks_since_break >= _next_break_at:
+                _ticks_since_break = 0
+                _next_break_at = random.randint(8, 18)
+                pause = random.uniform(30, 120)
+                logger.info(f"Human pause: {pause:.0f}s")
+                await asyncio.sleep(pause)
 
             if now - self._last_cleanup > 86400:
                 self._last_cleanup = now
