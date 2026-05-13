@@ -58,7 +58,7 @@ async def _stats_text() -> str:
     blocks = _monitor._blocks_today if _monitor else 0
     sent = _monitor._sent_today if _monitor else 0
     mult = _monitor._delay_mult if _monitor else 1.0
-    parser_ok = (_monitor._parser_started if _monitor else False)
+    parser_ok = (any(_monitor._parsers_started) if _monitor else False)
     return (
         "🔧 <b>Панель администратора</b>\n\n"
         f"👥 Пользователей: <b>{stats['total_users']}</b>  (платных: <b>{stats['paid_users']}</b>)\n"
@@ -237,12 +237,14 @@ async def _cb_restart(cb: CallbackQuery):
     await cb.answer("Перезапускаю...", show_alert=False)
     if _monitor:
         try:
-            if _monitor._parser_started:
-                await _monitor._parser.stop()
-                _monitor._parser_started = False
-            await _monitor._parser.start()
-            _monitor._parser_started = True
-            await cb.message.answer("✅ Парсер перезапущен.")
+            for i, parser in enumerate(_monitor._parsers):
+                if _monitor._parsers_started[i]:
+                    await parser.stop()
+                    _monitor._parsers_started[i] = False
+            for i, parser in enumerate(_monitor._parsers):
+                await parser.start()
+                _monitor._parsers_started[i] = True
+            await cb.message.answer("✅ Парсеры перезапущены.")
         except Exception as e:
             await cb.message.answer(f"❌ Ошибка: {e}")
     else:
