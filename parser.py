@@ -383,7 +383,8 @@ class AvitoParser:
             await page.mouse.wheel(0, delta)
             await asyncio.sleep(random.uniform(0.2, 0.6))
 
-    async def _get_html(self, url: str, referer: str = "", wait_selector: str = "") -> str:
+    async def _get_html(self, url: str, referer: str = "", wait_selector: str = "",
+                        playwright_only: bool = False) -> str:
         if time.time() < self._blocked_until:
             wait_sec = int(self._blocked_until - time.time())
             logger.info(f"Cooldown after block, {wait_sec}s left — skipping {url}")
@@ -396,18 +397,19 @@ class AvitoParser:
             except Exception as e:
                 logger.warning(f"Warmup failed: {e}")
 
-        # ── Fast path: curl_cffi (no browser, Chrome TLS fingerprint) ──
-        html = await self._cffi_get(url, referer)
-        if html:
-            logger.info(f"cffi OK ({len(html)} chars): {url[:70]}")
-            self._block_count = 0
-            return html
+        if not playwright_only:
+            # ── Fast path: curl_cffi (no browser, Chrome TLS fingerprint) ──
+            html = await self._cffi_get(url, referer)
+            if html:
+                logger.info(f"cffi OK ({len(html)} chars): {url[:70]}")
+                self._block_count = 0
+                return html
 
-        # If cffi triggered a 429 block cooldown, don't try Playwright
-        if time.time() < self._blocked_until:
-            return ""
+            # If cffi triggered a 429 block cooldown, don't try Playwright
+            if time.time() < self._blocked_until:
+                return ""
 
-        # ── Slow path: Playwright browser ─────────────────────────────
+        # ── Playwright browser ─────────────────────────────────────────
         async with self._context_lock:
             self._request_count += 1
             if self._request_count >= self._rotate_at:
@@ -515,6 +517,7 @@ class AvitoParser:
             clean_url,
             referer="https://www.avito.ru/",
             wait_selector='[data-marker="item-view/title-info"]',
+            playwright_only=True,  # detail pages need JS-rendered DOM for params/description
         )
         if not html:
             return listing
