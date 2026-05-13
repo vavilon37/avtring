@@ -1,10 +1,12 @@
 import asyncio
 import json
+import re
 import random
 import logging
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, urlencode, parse_qs
 from bs4 import BeautifulSoup, NavigableString
 from playwright.async_api import async_playwright, BrowserContext
 
@@ -502,8 +504,106 @@ class AvitoParser:
         finally:
             await page.close()
 
+    @staticmethod
+    def _to_rss_url(search_url: str) -> str:
+        p = urlparse(search_url)
+        rss_path = p.path.rstrip("/") + ".rss"
+        kept = {k: v[0] for k, v in parse_qs(p.query).items()
+                if k in ("q", "pmax", "pmin", "seller_type", "user", "companyId")}
+        return urlunparse(p._replace(path=rss_path, query=urlencode(kept) if kept else ""))
+
+    async def _fetch_rss(self, search_url: str) -> list[dict]:
+        if not _HAS_CURL_CFFI:
+            return []
+        rss_url = self._to_rss_url(search_url)
+        try:
+            async with _CurlSession(impersonate="chrome131") as session:
+                r = await session.get(
+                    rss_url,
+                    headers={
+                        "accept": "application/rss+xml,application/xml,text/xml,*/*;q=0.8",
+                        "user-agent": _CFFI_HEADERS["user-agent"],
+                        "accept-language": _CFFI_HEADERS["accept-language"],
+                    },
+                    timeout=15,
+                    allow_redirects=True,
+                )
+            if r.status_code != 200:
+                logger.info(f"RSS: HTTP {r.status_code} for {rss_url[:70]}")
+                return []
+            listings = self._parse_rss(r.text)
+            if listings:
+                logger.info(f"RSS: {len(listings)} items from {rss_url[:70]}")
+            return listings
+        except Exception as e:
+            logger.info(f"RSS fetch failed: {e}")
+            return []
+
+    @staticmethod
+    def _parse_rss(xml_text: str) -> list[dict]:
+        NS = "http://www.avito.ru/rss"
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as e:
+            logger.warning(f"RSS XML parse error: {e}")
+            return []
+        listings = []
+        for item in root.findall(".//item"):
+            def _t(tag: str) -> str:
+                el = item.find(tag)
+                return (el.text or "").strip() if el is not None else ""
+
+            link = _t("link")
+            if not link:
+                continue
+            m = re.search(r"_(\d{6,})(?:\?|$|/)", link)
+            if not m:
+                continue
+            item_id = m.group(1)
+
+            price_el = item.find(f"{{{NS}}}price") or item.find("price")
+            price_text = (price_el.text or "").strip() if price_el is not None else ""
+            if price_text.isdigit():
+                price_text = f"{int(price_text):,} ₽".replace(",", " ")
+            elif not price_text:
+                price_text = "Цена не указана"
+
+            loc_el = item.find(f"{{{NS}}}location") or item.find("location")
+            location = (loc_el.text or "").strip() if loc_el is not None else ""
+
+            img = ""
+            enc = item.find("enclosure")
+            if enc is not None:
+                img = enc.get("url", "")
+            if not img:
+                img_el = item.find(f"{{{NS}}}images")
+                if img_el is not None:
+                    first_img = img_el.find(f"{{{NS}}}image") or img_el.find("image")
+                    if first_img is not None:
+                        img = (first_img.text or "").strip()
+
+            listings.append({
+                "id": item_id,
+                "title": _t("title"),
+                "price": price_text,
+                "link": link,
+                "images": [img] if img else [],
+                "location": location,
+                "date": _t("pubDate"),
+                "description": _t("description"),
+                "seller_name": "",
+                "seller_type": "",
+                "params": {},
+            })
+        return listings
+
     async def fetch_listings(self, url: str) -> list[dict]:
-        # List pages need JS-rendered DOM for data-markers — Playwright only
+        # Try RSS first — no browser, no detection, pure HTTP
+        listings = await self._fetch_rss(url)
+        if listings:
+            return listings
+        # Fallback: Playwright (JS-rendered DOM with data-markers)
+        logger.info("RSS returned 0 — falling back to Playwright for list page")
         html = await self._get_html(url, wait_selector='[data-marker="item"]', playwright_only=True)
         if not html:
             return []
