@@ -194,4 +194,118 @@ else:
     print("   Не найдено")
 
 print(f"\n{'='*60}")
+print("6. НАЧАЛО script[61] — что за тип данных?")
+scripts_raw = soup.find_all("script")
+sc61 = scripts_raw[61].string or "" if len(scripts_raw) > 61 else ""
+if sc61:
+    sample = sc61[:300].strip()
+    print(f"   Первые 300 символов: {sample!r}")
+    is_b64 = bool(re.match(r'^[A-Za-z0-9+/=\s]{50,}$', sample.replace('\n', '').replace('\r', '')))
+    print(f"   Похоже на base64: {is_b64}")
+
+print(f"\n{'='*60}")
+print("7. window.appStorage — полный разбор")
+# Найти в сыром HTML
+m = re.search(r'window\.appStorage\s*=\s*(\{)', html)
+if m:
+    start = m.start(1)
+    depth = 0
+    in_str = False
+    esc = False
+    sq = False  # single-quote string
+    end = None
+    for i in range(start, min(start + 200000, len(html))):
+        c = html[i]
+        if esc:
+            esc = False
+            continue
+        if c == '\\' and (in_str or sq):
+            esc = True
+            continue
+        if c == '"' and not sq:
+            in_str = not in_str
+            continue
+        if c == "'" and not in_str:
+            sq = not sq
+            continue
+        if in_str or sq:
+            continue
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end:
+        raw = html[start:end + 1]
+        print(f"   Размер: {len(raw):,} chars")
+        # Конвертируем JS-объект в JSON (одинарные кавычки → двойные, unquoted keys → quoted)
+        # Простой эвристический конвертер
+        def js_to_json(s):
+            # single-quote strings → double-quote (не внутри double-quoted)
+            s = re.sub(r"(?<![\\])'", '"', s)
+            # unquoted keys: word: → "word":
+            s = re.sub(r'(?<!["\w])(\b[a-zA-Z_$][\w$]*)\s*:', r'"\1":', s)
+            # trailing commas
+            s = re.sub(r',\s*([}\]])', r'\1', s)
+            return s
+        try:
+            data = json.loads(js_to_json(raw))
+            print(f"   Ключи верхнего уровня: {list(data.keys())}")
+            # Рекурсивно ищем items
+            def find_items(obj, path="", depth=0):
+                if depth > 6:
+                    return
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        p = f"{path}.{k}" if path else k
+                        if k in ("items", "catalog", "listing", "ads", "adverts") and isinstance(v, list) and len(v) >= 2:
+                            print(f"   *** items @ {p}: {len(v)} элементов ***")
+                            if v and isinstance(v[0], dict):
+                                print(f"       Ключи первого: {list(v[0].keys())[:15]}")
+                                out = Path("recon_results/appStorage_items.json")
+                                out.write_text(json.dumps(v[:3], ensure_ascii=False, indent=2), encoding="utf-8")
+                                print(f"       Сохранено → appStorage_items.json")
+                        elif isinstance(v, (dict, list)):
+                            find_items(v, p, depth + 1)
+                elif isinstance(obj, list) and obj:
+                    find_items(obj[0], f"{path}[0]", depth + 1)
+            find_items(data)
+            out = Path("recon_results/appStorage.json")
+            out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"   Сохранено → recon_results/appStorage.json")
+        except Exception as e:
+            print(f"   JSON parse error: {e}")
+            print(f"   Первые 500 chars raw: {raw[:500]!r}")
+            out = Path("recon_results/appStorage_raw.txt")
+            out.write_text(raw[:50000], encoding="utf-8", errors="ignore")
+            print(f"   Сырой текст (50KB) → recon_results/appStorage_raw.txt")
+else:
+    print("   window.appStorage не найден")
+
+# Ищем ВСЕ window.* присваивания и показываем размер каждого
+print(f"\n{'='*60}")
+print("8. РАЗМЕРЫ ВСЕХ window.* ОБЪЕКТОВ")
+for m in re.finditer(r'window\.([A-Za-z_]\w+)\s*=\s*\{', html):
+    name = m.group(1)
+    start = m.start() + m.group().index('{')
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, min(start + 500000, len(html))):
+        c = html[i]
+        if esc:            esc = False; continue
+        if c == '\\' and in_str: esc = True; continue
+        if c == '"':       in_str = not in_str; continue
+        if in_str:         continue
+        if c == '{':       depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                size = i - start + 1
+                print(f"   window.{name}: {size:,} chars")
+                break
+
+print(f"\n{'='*60}")
 print("ГОТОВО. Проверь recon_results/")
