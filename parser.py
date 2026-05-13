@@ -20,10 +20,10 @@ except ImportError:
 try:
     from curl_cffi.requests import AsyncSession as _CurlSession
     _HAS_CURL_CFFI = True
-    logger.info("curl-cffi loaded — fast HTTP path enabled")
+    print("[parser] curl-cffi OK")
 except Exception as _cffi_err:
     _HAS_CURL_CFFI = False
-    logger.info(f"curl-cffi unavailable ({type(_cffi_err).__name__}: {_cffi_err}) — Playwright only")
+    print(f"[parser] curl-cffi FAIL: {type(_cffi_err).__name__}: {_cffi_err}")
 
 PROFILE_DIR = str(Path(__file__).parent / "chrome_profile")
 PROFILE_DIRS = [
@@ -190,7 +190,7 @@ class AvitoParser:
         self._pw = await async_playwright().start()
         await self._new_context()
         self._needs_warmup = True  # always warm up before first real request
-        logger.info("Parser started (Playwright persistent)")
+        logger.info(f"Parser started. curl_cffi={'ON' if _HAS_CURL_CFFI else 'OFF'}")
 
     async def _new_context(self):
         if self._context:
