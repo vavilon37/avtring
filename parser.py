@@ -503,7 +503,8 @@ class AvitoParser:
             await page.close()
 
     async def fetch_listings(self, url: str) -> list[dict]:
-        html = await self._get_html(url, wait_selector='[data-marker="item"]')
+        # List pages need JS-rendered DOM for data-markers — Playwright only
+        html = await self._get_html(url, wait_selector='[data-marker="item"]', playwright_only=True)
         if not html:
             return []
         return self._parse_list_html(html, url)
