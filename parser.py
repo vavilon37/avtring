@@ -21,9 +21,9 @@ try:
     from curl_cffi.requests import AsyncSession as _CurlSession
     _HAS_CURL_CFFI = True
     logger.info("curl-cffi loaded — fast HTTP path enabled")
-except ImportError:
+except Exception as _cffi_err:
     _HAS_CURL_CFFI = False
-    logger.info("curl-cffi not installed — Playwright only")
+    logger.info(f"curl-cffi unavailable ({type(_cffi_err).__name__}: {_cffi_err}) — Playwright only")
 
 PROFILE_DIR = str(Path(__file__).parent / "chrome_profile")
 PROFILE_DIRS = [
@@ -189,6 +189,7 @@ class AvitoParser:
     async def start(self):
         self._pw = await async_playwright().start()
         await self._new_context()
+        self._needs_warmup = True  # always warm up before first real request
         logger.info("Parser started (Playwright persistent)")
 
     async def _new_context(self):
