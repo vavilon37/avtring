@@ -71,6 +71,17 @@ def _parse_avito_date(date_str: str) -> datetime | None:
     if m:
         return now - timedelta(hours=int(m.group(1)))
 
+    m = re.match(r"(\d+)\s*дн", s)  # "7 дней назад", "2 дня назад"
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+
+    # RSS pubDate: "Wed, 13 May 2026 21:00:00 +0300"
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(date_str).astimezone(timezone.utc).replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
+
     m = re.search(r"сегодня.*?(\d{1,2})[:\.](\d{2})", s)
     if m:
         t = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
@@ -167,7 +178,7 @@ def is_accessory(listing: dict) -> bool:
     return bool(_ACCESSORY_RE.search(listing.get("title", "")))
 
 
-def is_too_old(listing: dict, max_age_minutes: int = 180) -> bool:
+def is_too_old(listing: dict, max_age_minutes: int = 1440) -> bool:
     date_str = listing.get("date", "")
     if not date_str:
         return False

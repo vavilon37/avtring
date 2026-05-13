@@ -20,7 +20,7 @@ MIN_PAID_URL_INTERVAL = 90.0  # seconds between re-checks of the same URL
 logger = logging.getLogger(__name__)
 
 
-EMPTY_PARAMS_THRESHOLD = 5  # alert after this many consecutive listings with no params
+EMPTY_PARAMS_THRESHOLD = 999  # disabled — params are empty by design with RSS/cffi parsing
 
 class Monitor:
     def __init__(self, bot: Bot):

@@ -8,6 +8,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     InputMediaPhoto,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    LinkPreviewOptions,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -580,20 +581,23 @@ async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str):
     images = [img for img in listing.get("images", []) if img and img.startswith("http")]
 
     try:
+        _no_preview = LinkPreviewOptions(is_disabled=True)
         if images:
-            # Download first image and send as file (Telegram can't fetch Avito images directly)
             photo_bytes = await _download_image(images[0])
             if photo_bytes:
                 from aiogram.types import BufferedInputFile
                 photo_file = BufferedInputFile(photo_bytes, filename="photo.jpg")
                 await bot.send_photo(chat_id=user_id, photo=photo_file, caption=text, parse_mode="HTML")
             else:
-                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
+                                       link_preview_options=_no_preview)
         else:
-            await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+            await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
+                                   link_preview_options=_no_preview)
     except Exception as e:
         logger.warning(f"Send failed for {user_id}: {e}")
         try:
-            await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+            await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
+                                   link_preview_options=LinkPreviewOptions(is_disabled=True))
         except Exception as e2:
             logger.error(f"Fallback send failed for {user_id}: {e2}")
