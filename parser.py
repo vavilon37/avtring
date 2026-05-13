@@ -527,6 +527,17 @@ class AvitoParser:
         soup = BeautifulSoup(html, "lxml")
         listings = []
         items = soup.find_all("div", attrs={"data-marker": "item"})
+        if not items:
+            # Diagnostic: log what data-markers ARE present in this HTML
+            all_markers = list({t.get("data-marker") for t in soup.find_all(attrs={"data-marker": True})})
+            logger.info(f"[list-debug] 0 items found. data-markers in page: {all_markers[:30]}")
+            try:
+                debug_path = Path("last_list_page.html")
+                if not debug_path.exists():
+                    debug_path.write_text(html[:80000], encoding="utf-8", errors="ignore")
+                    logger.info("[list-debug] saved first 80KB to last_list_page.html")
+            except Exception:
+                pass
         for item in items:
             try:
                 listing = self._extract_list_item(item)
