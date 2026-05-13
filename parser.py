@@ -549,30 +549,28 @@ class AvitoParser:
 
     @staticmethod
     def _parse_rss(xml_text: str) -> list[dict]:
-        NS = "http://www.avito.ru/rss"
-        # Strip XML-invalid control chars (keep \t \n \r)
-        clean = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', xml_text)
-        root = None
+        # Strip ALL XML 1.0 invalid code points before parsing
+        clean = re.sub(
+            r'[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]',
+            '', xml_text,
+        )
+        # BeautifulSoup + lxml-xml handles malformed RSS via lxml recovery mode
         try:
-            root = ET.fromstring(clean)
-        except ET.ParseError as e:
-            logger.warning(f"RSS ET parse error: {e} — trying lxml recovery")
-            try:
-                import lxml.etree as lET
-                root = lET.fromstring(
-                    clean.encode("utf-8", errors="replace"),
-                    parser=lET.XMLParser(recover=True),
-                )
-            except Exception as e2:
-                logger.warning(f"RSS lxml recovery failed: {e2}")
-                return []
-        if root is None:
+            soup = BeautifulSoup(clean, "lxml-xml")
+        except Exception as e:
+            logger.warning(f"RSS parse error: {e}")
             return []
+
+        items = soup.find_all("item")
+        if not items:
+            logger.debug(f"RSS: no <item> found; first 300 chars: {clean[:300]!r}")
+            return []
+
         listings = []
-        for item in root.findall(".//item"):
+        for item in items:
             def _t(tag: str) -> str:
                 el = item.find(tag)
-                return (el.text or "").strip() if el is not None else ""
+                return el.get_text(strip=True) if el else ""
 
             link = _t("link")
             if not link:
@@ -582,26 +580,26 @@ class AvitoParser:
                 continue
             item_id = m.group(1)
 
-            price_el = item.find(f"{{{NS}}}price") or item.find("price")
-            price_text = (price_el.text or "").strip() if price_el is not None else ""
+            price_el = item.find("price")
+            price_text = price_el.get_text(strip=True) if price_el else ""
             if price_text.isdigit():
-                price_text = f"{int(price_text):,} ₽".replace(",", " ")
+                price_text = f"{int(price_text):,} \u20bd".replace(",", "\xa0")
             elif not price_text:
-                price_text = "Цена не указана"
+                price_text = "\u0426\u0435\u043d\u0430 \u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u0430"
 
-            loc_el = item.find(f"{{{NS}}}location") or item.find("location")
-            location = (loc_el.text or "").strip() if loc_el is not None else ""
+            loc_el = item.find("location")
+            location = loc_el.get_text(strip=True) if loc_el else ""
 
             img = ""
             enc = item.find("enclosure")
-            if enc is not None:
+            if enc:
                 img = enc.get("url", "")
             if not img:
-                img_el = item.find(f"{{{NS}}}images")
-                if img_el is not None:
-                    first_img = img_el.find(f"{{{NS}}}image") or img_el.find("image")
-                    if first_img is not None:
-                        img = (first_img.text or "").strip()
+                img_el = item.find("images")
+                if img_el:
+                    first_img = img_el.find("image")
+                    if first_img:
+                        img = first_img.get_text(strip=True)
 
             desc_raw = _t("description")
             desc = re.sub(r'<[^>]+>', ' ', desc_raw).strip()
