@@ -15,7 +15,7 @@ from listing_filter import filter_listings, filter_after_detail, listing_datetim
 
 MAX_DETAIL_FETCH = 2    # max detail pages per cycle (Playwright — keep low)
 DETAIL_CONCURRENCY = 1  # sequential detail fetches — less suspicious
-MIN_PAID_URL_INTERVAL = 90.0  # seconds between re-checks of the same URL
+MIN_PAID_URL_INTERVAL = 30.0  # seconds between re-checks of the same URL
 
 logger = logging.getLogger(__name__)
 
@@ -239,13 +239,13 @@ class Monitor:
 
             if found_any:
                 no_result_streak = 0
-                delay = random.uniform(5, 12)
+                delay = random.uniform(2, 5)
             else:
                 # Don't grow streak while Avito cooldown is active — parser skips anyway
                 parser_blocked = any(time.time() < p._blocked_until for p in self._parsers)
                 if not parser_blocked:
                     no_result_streak = min(no_result_streak + 1, 5)
-                base = min(10 * (1.5 ** no_result_streak), 25)
+                base = min(5 * (1.4 ** no_result_streak), 12)
                 delay = random.uniform(base * 0.7, base * 1.3)
 
             logger.debug(f"Next check in {delay:.1f}s (streak={no_result_streak})")

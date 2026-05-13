@@ -513,7 +513,9 @@ class AvitoParser:
         return urlunparse(p._replace(path=rss_path, query=urlencode(kept) if kept else ""))
 
     async def _fetch_rss(self, search_url: str) -> list[dict]:
-        if not _HAS_CURL_CFFI:
+        if not _HAS_CURL_CFFI or not self._curl_cookies:
+            return []
+        if time.time() < self._blocked_until:
             return []
         rss_url = self._to_rss_url(search_url)
         try:
@@ -521,21 +523,25 @@ class AvitoParser:
                 r = await session.get(
                     rss_url,
                     headers={
-                        "accept": "application/rss+xml,application/xml,text/xml,*/*;q=0.8",
-                        "user-agent": _CFFI_HEADERS["user-agent"],
-                        "accept-language": _CFFI_HEADERS["accept-language"],
-                        "referer": "https://www.avito.ru/",
+                        **_CFFI_HEADERS,
+                        "referer": search_url,
+                        "sec-fetch-site": "same-origin",
+                        "sec-fetch-dest": "document",
+                        "sec-fetch-mode": "navigate",
+                        "sec-fetch-user": "?1",
                     },
                     cookies=self._curl_cookies,
                     timeout=15,
                     allow_redirects=True,
                 )
             if r.status_code != 200:
-                logger.info(f"RSS: HTTP {r.status_code} for {rss_url[:70]}")
+                logger.info(f"RSS: HTTP {r.status_code} ({len(r.text)} chars) for {rss_url[:70]}")
                 return []
             listings = self._parse_rss(r.text)
             if listings:
                 logger.info(f"RSS: {len(listings)} items from {rss_url[:70]}")
+            else:
+                logger.info(f"RSS: 200 OK but 0 items parsed ({len(r.text)} chars)")
             return listings
         except Exception as e:
             logger.info(f"RSS fetch failed: {e}")
