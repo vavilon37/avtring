@@ -311,14 +311,36 @@ print(f"\n{'='*60}")
 print("9. window.preloadedState — декодируем и разбираем")
 from urllib.parse import unquote
 
-m_ps = re.search(r'window\.preloadedState\s*=\s*"((?:[^"\\]|\\.)*)"', html)
-if not m_ps:
-    # Иногда в одинарных кавычках или без кавычек
-    m_ps = re.search(r"window\.preloadedState\s*=\s*'((?:[^'\\]|\\.)*)'", html)
-if m_ps:
-    raw_encoded = m_ps.group(1)
-    # Убираем JS-escape (\")
-    raw_encoded = raw_encoded.replace('\\"', '"').replace("\\'", "'")
+def extract_js_string(text: str, start_needle: str) -> str | None:
+    """Найти JS-строковое значение в тексте без regex-ограничений по длине."""
+    pos = text.find(start_needle)
+    if pos == -1:
+        return None
+    pos += len(start_needle)
+    # Пропускаем пробелы и = и открывающую кавычку
+    while pos < len(text) and text[pos] in ' \t\n\r=':
+        pos += 1
+    if pos >= len(text):
+        return None
+    quote_char = text[pos]
+    if quote_char not in ('"', "'"):
+        return None
+    pos += 1  # пропускаем открывающую кавычку
+    result = []
+    while pos < len(text):
+        c = text[pos]
+        if c == '\\' and pos + 1 < len(text):
+            result.append(text[pos + 1])
+            pos += 2
+            continue
+        if c == quote_char:
+            break
+        result.append(c)
+        pos += 1
+    return ''.join(result)
+
+raw_encoded = extract_js_string(html, 'window.preloadedState')
+if raw_encoded:
     decoded = unquote(raw_encoded)
     print(f"   Длина encoded: {len(raw_encoded):,} chars")
     print(f"   Длина decoded: {len(decoded):,} chars")
@@ -373,6 +395,11 @@ if m_ps:
         print(f"   Декодированный текст (100KB) → recon_results/preloadedState_decoded.txt")
 else:
     print("   window.preloadedState не найден")
+    # Попробуем найти window.__mfe тоже
+    raw_mfe = extract_js_string(html, 'window.__mfe')
+    if raw_mfe:
+        decoded_mfe = unquote(raw_mfe)
+        print(f"   window.__mfe decoded: {decoded_mfe[:200]!r}")
 
 print(f"\n{'='*60}")
 print("ГОТОВО. Проверь recon_results/")
