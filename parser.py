@@ -19,7 +19,7 @@ except ImportError:
 
 PROFILE_DIR = str(Path(__file__).parent / "chrome_profile")
 PROFILE_DIRS = [
-    str(Path(__file__).parent / f"chrome_profile_{i}") for i in range(3)
+    str(Path(__file__).parent / f"chrome_profile_{i}") for i in range(6)
 ]
 CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 

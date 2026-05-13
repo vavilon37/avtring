@@ -25,8 +25,12 @@ EMPTY_PARAMS_THRESHOLD = 5  # alert after this many consecutive listings with no
 class Monitor:
     def __init__(self, bot: Bot):
         self.bot = bot
-        self._parser = AvitoParser(on_blocked=self._notify_blocked)
-        self._parser_started = False
+        self._parsers = [
+            AvitoParser(on_blocked=self._notify_blocked),
+            AvitoParser(on_blocked=self._notify_blocked),
+        ]
+        self._parsers[1]._profile_idx = 3  # separate profile set from parser 0
+        self._parsers_started = [False, False]
         self._running = False
         self._task: asyncio.Task | None = None
         self._empty_params_streak: int = 0
@@ -120,11 +124,11 @@ class Monitor:
             logger.warning(f"Failed to send block notification: {e}")
 
     async def fetch_preview(self, url: str, limit: int = 2) -> list[dict]:
-        if not self._parser_started:
+        if not self._parsers_started[0]:
             return []
         try:
             listings = await asyncio.wait_for(
-                self._parser.fetch_listings(url), timeout=30.0
+                self._parsers[0].fetch_listings(url), timeout=30.0
             )
             return filter_listings(listings)[:limit]
         except Exception as e:
@@ -170,21 +174,23 @@ class Monitor:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        if self._parser_started:
-            try:
-                await asyncio.wait_for(self._parser.stop(), timeout=15)
-            except asyncio.TimeoutError:
-                logger.warning("Parser did not stop within 15s — forcing exit")
-            self._parser_started = False
+        for i, parser in enumerate(self._parsers):
+            if self._parsers_started[i]:
+                try:
+                    await asyncio.wait_for(parser.stop(), timeout=15)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Parser {i} did not stop within 15s — forcing exit")
+                self._parsers_started[i] = False
         logger.info("Monitor stopped")
 
-    async def _ensure_parser(self, has_watches: bool):
-        if has_watches and not self._parser_started:
-            await self._parser.start()
-            self._parser_started = True
-        elif not has_watches and self._parser_started:
-            await self._parser.stop()
-            self._parser_started = False
+    async def _ensure_parsers(self, has_watches: bool):
+        for i, parser in enumerate(self._parsers):
+            if has_watches and not self._parsers_started[i]:
+                await parser.start()
+                self._parsers_started[i] = True
+            elif not has_watches and self._parsers_started[i]:
+                await parser.stop()
+                self._parsers_started[i] = False
 
     async def _loop(self):
         await asyncio.sleep(3)
@@ -223,21 +229,22 @@ class Monitor:
                 found_any = False
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= 3:
-                    logger.warning("3 consecutive failures — restarting parser")
-                    try:
-                        await self._parser.stop()
-                        await self._parser.start()
-                        self._parser_started = True
-                        self._consecutive_failures = 0
-                    except Exception as re:
-                        logger.error(f"Parser restart failed: {re}")
+                    logger.warning("3 consecutive failures — restarting parsers")
+                    for i, parser in enumerate(self._parsers):
+                        try:
+                            await parser.stop()
+                            await parser.start()
+                            self._parsers_started[i] = True
+                        except Exception as re:
+                            logger.error(f"Parser {i} restart failed: {re}")
+                    self._consecutive_failures = 0
 
             if found_any:
                 no_result_streak = 0
                 delay = random.uniform(5, 12)
             else:
                 # Don't grow streak while Avito cooldown is active — parser skips anyway
-                parser_blocked = time.time() < self._parser._blocked_until
+                parser_blocked = any(time.time() < p._blocked_until for p in self._parsers)
                 if not parser_blocked:
                     no_result_streak = min(no_result_streak + 1, 5)
                 base = min(10 * (1.5 ** no_result_streak), 25)
@@ -250,7 +257,7 @@ class Monitor:
         logger.info("Monitor tick")
         self._tick_sent.clear()
         watches = await db.get_all_watches()
-        await self._ensure_parser(bool(watches))
+        await self._ensure_parsers(bool(watches))
 
         if not watches:
             logger.info("No watches in DB")
@@ -286,18 +293,32 @@ class Monitor:
                 f"Checking {len(paid_watches)} paid watches "
                 f"→ {len(url_groups)} unique URLs"
             )
-            processed = 0
-            for url, watchers in shuffled:
-                last_checked = self._url_last_checked.get(url, 0)
-                if now - last_checked < MIN_PAID_URL_INTERVAL:
-                    logger.debug(f"Skip {url[:50]} — checked {now - last_checked:.0f}s ago")
-                    continue
-                if processed > 0:
-                    await asyncio.sleep(random.uniform(2.0, 5.0) * self._delay_mult)
-                self._url_last_checked[url] = now
-                processed += 1
-                if await self._check_url_group(url, watchers):
-                    found_any = True
+
+            half = (len(shuffled) + 1) // 2
+            parser_groups = [shuffled[:half], shuffled[half:]]
+
+            async def _run_paid(parser, url_group):
+                found = False
+                processed = 0
+                for url, watchers in url_group:
+                    last_checked = self._url_last_checked.get(url, 0)
+                    if now - last_checked < MIN_PAID_URL_INTERVAL:
+                        logger.debug(f"Skip {url[:50]} — checked {now - last_checked:.0f}s ago")
+                        continue
+                    if processed > 0:
+                        await asyncio.sleep(random.uniform(2.0, 5.0) * self._delay_mult)
+                    self._url_last_checked[url] = now
+                    processed += 1
+                    if await self._check_url_group(url, watchers, parser):
+                        found = True
+                return found
+
+            results = await asyncio.gather(
+                _run_paid(self._parsers[0], parser_groups[0]),
+                _run_paid(self._parsers[1], parser_groups[1]),
+            )
+            if any(results):
+                found_any = True
 
         if free_watches:
             last = getattr(self, "_last_free_check", 0)
@@ -317,14 +338,14 @@ class Monitor:
                     if processed > 0:
                         await asyncio.sleep(random.uniform(2.0, 5.0) * self._delay_mult)
                     processed += 1
-                    if await self._check_url_group(url, watchers):
+                    if await self._check_url_group(url, watchers, self._parsers[0]):
                         found_any = True
 
         return found_any
 
-    async def _check_url_group(self, url: str, watchers: list[dict]) -> bool:
+    async def _check_url_group(self, url: str, watchers: list[dict], parser: AvitoParser) -> bool:
         try:
-            listings = await self._parser.fetch_listings(url)
+            listings = await parser.fetch_listings(url)
             if listings and self._block_alerted:
                 self._block_alerted = False
                 await self._notify_recovered()
@@ -362,7 +383,7 @@ class Monitor:
                 async with sem:
                     await asyncio.sleep(random.uniform(0.8, 2.0) * self._delay_mult)
                     try:
-                        enriched = await self._parser.fetch_listing_detail(lst)
+                        enriched = await parser.fetch_listing_detail(lst)
                         # Tag as failed if detail page returned no data
                         if not enriched.get("description") and not enriched.get("params") and not enriched.get("seller_name"):
                             enriched["_detail_failed"] = True
