@@ -308,4 +308,71 @@ for m in re.finditer(r'window\.([A-Za-z_]\w+)\s*=\s*\{', html):
                 break
 
 print(f"\n{'='*60}")
+print("9. window.preloadedState — декодируем и разбираем")
+from urllib.parse import unquote
+
+m_ps = re.search(r'window\.preloadedState\s*=\s*"((?:[^"\\]|\\.)*)"', html)
+if not m_ps:
+    # Иногда в одинарных кавычках или без кавычек
+    m_ps = re.search(r"window\.preloadedState\s*=\s*'((?:[^'\\]|\\.)*)'", html)
+if m_ps:
+    raw_encoded = m_ps.group(1)
+    # Убираем JS-escape (\")
+    raw_encoded = raw_encoded.replace('\\"', '"').replace("\\'", "'")
+    decoded = unquote(raw_encoded)
+    print(f"   Длина encoded: {len(raw_encoded):,} chars")
+    print(f"   Длина decoded: {len(decoded):,} chars")
+    print(f"   Первые 200 chars decoded: {decoded[:200]!r}")
+    try:
+        state = json.loads(decoded)
+        print(f"\n   Ключи верхнего уровня ({len(state)}): {list(state.keys())[:20]}")
+
+        # Рекурсивно ищем любые массивы с 5+ элементами — это кандидаты на листинги
+        def scan(obj, path="", depth=0):
+            if depth > 8:
+                return
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    p = f"{path}.{k}" if path else k
+                    if isinstance(v, list) and len(v) >= 5:
+                        # Проверяем — есть ли поля, похожие на листинг
+                        if v and isinstance(v[0], dict):
+                            keys0 = set(v[0].keys())
+                            listing_signals = keys0 & {"id", "title", "price", "url", "urlPath",
+                                                        "name", "description", "seller", "images"}
+                            if len(listing_signals) >= 3:
+                                print(f"\n   *** ЛИСТИНГИ @ {p}: {len(v)} элементов ***")
+                                print(f"       Ключи: {list(v[0].keys())[:20]}")
+                                has_desc   = any(k in v[0] for k in ("description","body"))
+                                has_seller = any(k in v[0] for k in ("seller","user","sellerInfo"))
+                                has_price  = any(k in v[0] for k in ("price","priceDetailed"))
+                                print(f"       description={has_desc}  seller={has_seller}  price={has_price}")
+                                out = Path(f"recon_results/preloaded_items.json")
+                                out.write_text(
+                                    json.dumps(v[:3], ensure_ascii=False, indent=2), encoding="utf-8"
+                                )
+                                print(f"       Первые 3 → recon_results/preloaded_items.json")
+                            elif len(v) >= 10:
+                                print(f"   массив @ {p}: {len(v)} эл, ключи={list(v[0].keys())[:8]}")
+                    elif isinstance(v, (dict, list)):
+                        scan(v, p, depth + 1)
+            elif isinstance(obj, list):
+                for item in obj[:2]:
+                    scan(item, f"{path}[]", depth + 1)
+
+        scan(state)
+
+        out = Path("recon_results/preloadedState.json")
+        out.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n   Полный state сохранён → recon_results/preloadedState.json")
+
+    except json.JSONDecodeError as e:
+        print(f"   JSON parse error: {e}")
+        out = Path("recon_results/preloadedState_decoded.txt")
+        out.write_text(decoded[:100000], encoding="utf-8", errors="ignore")
+        print(f"   Декодированный текст (100KB) → recon_results/preloadedState_decoded.txt")
+else:
+    print("   window.preloadedState не найден")
+
+print(f"\n{'='*60}")
 print("ГОТОВО. Проверь recon_results/")
