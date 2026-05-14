@@ -224,7 +224,7 @@ async def _cmd_help(msg: Message):
         "4. При новом объявлении — сразу пришлю карточку с фото, "
         "характеристиками, описанием и ценой\n\n"
         "<b>Подписка:</b>\n"
-        f"💎 {PRICE_RUB}₽/{SUBSCRIPTION_DAYS} дней — до {PAID_MAX_WATCHES} поисков, проверка каждые 15 сек\n\n"
+        f"💎 {PRICE_RUB}₽/{SUBSCRIPTION_DAYS} дней — до {PAID_MAX_WATCHES} поисков, проверка каждые 30 сек\n\n"
         "Удалить поиск — <b>🗑 Удалить поиск</b>.",
         parse_mode="HTML",
         reply_markup=_main_menu(),
@@ -255,7 +255,7 @@ async def _cmd_sub(msg: Message):
     await msg.answer(
         f"{plan_str}\n\n"
         f"💎 <b>Подписка Avito Ringer</b>\n\n"
-        f"• Проверка каждые <b>15 секунд</b>\n"
+        f"• Проверка каждые <b>30 секунд</b>\n"
         f"• До <b>3 поисков</b> одновременно\n"
         f"• Срок: <b>{SUBSCRIPTION_DAYS} дней</b>\n"
         f"• Цена: <b>{PRICE_RUB}₽</b>\n\n"
@@ -277,7 +277,7 @@ async def _cb_check_payment(cb: CallbackQuery):
         await cb.message.edit_text(
             f"✅ <b>Подписка активирована!</b>\n\n"
             f"Действует до <b>{expires_str}</b>\n"
-            f"Проверка каждые 15 секунд, до 3 поисков.",
+            f"Проверка каждые 30 секунд, до 3 поисков.",
             parse_mode="HTML",
         )
     else:
@@ -293,7 +293,7 @@ async def _cmd_add(msg: Message, state: FSMContext):
     if plan == "free":
         await msg.answer(
             f"🔒 <b>Пробный период закончился</b>\n\n"
-            f"Оформи подписку 💎 за {PRICE_RUB}₽/{SUBSCRIPTION_DAYS} дней — до {PAID_MAX_WATCHES} поисков, проверка каждые 15 сек.\n\n"
+            f"Оформи подписку 💎 за {PRICE_RUB}₽/{SUBSCRIPTION_DAYS} дней — до {PAID_MAX_WATCHES} поисков, проверка каждые 30 сек.\n\n"
             f"Или пригласи друга — получи <b>+1 день</b> бесплатно 🔗",
             parse_mode="HTML",
             reply_markup=_main_menu(),
@@ -417,7 +417,7 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
     await db.add_watch(cb.from_user.id, url, label, storage_gb)
 
     plan = await db.get_user_plan(cb.from_user.id)
-    interval_note = "каждые 15 секунд" if plan in ("paid", "trial") else "раз в 5 минут"
+    interval_note = "каждые 30 секунд" if plan in ("paid", "trial") else "раз в 5 минут"
 
     try:
         await cb.message.edit_reply_markup()

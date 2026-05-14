@@ -462,6 +462,8 @@ class AvitoParser:
                         data = json.loads(body)
                         if not isinstance(data, dict):
                             return
+                        top_keys = list(data.keys())[:8]
+                        logger.info(f"[xhr] {len(body)}b {rurl[:90]} keys={top_keys}")
                         items = (
                             data.get("items")
                             or (data.get("result") or {}).get("items")
