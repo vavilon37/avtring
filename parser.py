@@ -833,18 +833,8 @@ class AvitoParser:
         parsed = urlparse(url)
         clean_url = urlunparse(parsed._replace(query="", fragment=""))
 
-        # cffi fast path — Avito detail pages are JS-rendered (React CSR).
-        # cffi fetches SSR HTML which has no item content (only nav/footer).
-        # Detect empty content and fall back to Playwright automatically.
-        if _HAS_CURL_CFFI and self._curl_cookies and time.time() >= self._blocked_until:
-            html = await self._cffi_get(clean_url, referer="https://www.avito.ru/")
-            if html:
-                result = self._parse_detail_html(html, listing)
-                if result.get("description") or result.get("seller_name"):
-                    return result
-                logger.info(f"cffi detail: SSR-only page, no content — falling back to Playwright")
-
-        # Playwright: waits for JS hydration, gets full item data
+        # Avito detail pages are React CSR — cffi gets nav/footer only, never content.
+        # Go straight to Playwright.
         html = await self._get_html(
             clean_url,
             referer="https://www.avito.ru/",
@@ -945,6 +935,16 @@ class AvitoParser:
             if p_text:
                 params["Характеристики"] = p_text
 
+        # --- Description preview (short snippet shown in list card) ---
+        desc = ""
+        desc_el = (
+            item.find(attrs={"data-marker": "item-description"})
+            or item.find(lambda t: t.name and t.get("data-marker", "").endswith("-description"))
+            or item.find("p", attrs={"itemprop": "description"})
+        )
+        if desc_el:
+            desc = desc_el.get_text(strip=True)[:300]
+
         return {
             "id": str(item_id),
             "title": title,
@@ -953,7 +953,7 @@ class AvitoParser:
             "images": [image_url] if image_url else [],
             "location": location,
             "date": date,
-            "description": "",
+            "description": desc,
             "seller_name": seller_name,
             "seller_type": seller_type,
             "params": params,

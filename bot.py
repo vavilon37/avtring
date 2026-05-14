@@ -1,4 +1,5 @@
 import logging
+import httpx
 from datetime import datetime, timezone, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -564,6 +565,17 @@ def _build_listing_text(listing: dict, watch_label: str) -> str:
     return "\n".join(lines)
 
 
+async def _download_image(url: str) -> bytes | None:
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            r = await client.get(url, headers={"Referer": "https://www.avito.ru/"})
+            if r.status_code == 200:
+                return r.content
+    except Exception:
+        pass
+    return None
+
+
 async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str):
     text = _build_listing_text(listing, watch_label)
     images = [img for img in listing.get("images", []) if img and img.startswith("http")]
@@ -571,7 +583,25 @@ async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str):
     try:
         _no_preview = LinkPreviewOptions(is_disabled=True)
         if images:
-            await bot.send_photo(chat_id=user_id, photo=images[0], caption=text, parse_mode="HTML")
+            sent = False
+            try:
+                await bot.send_photo(chat_id=user_id, photo=images[0], caption=text, parse_mode="HTML")
+                sent = True
+            except Exception:
+                pass
+            if not sent:
+                # Avito CDN requires Referer — Telegram doesn't send it; download and re-upload
+                photo_bytes = await _download_image(images[0])
+                if photo_bytes:
+                    from aiogram.types import BufferedInputFile
+                    await bot.send_photo(
+                        chat_id=user_id,
+                        photo=BufferedInputFile(photo_bytes, filename="photo.jpg"),
+                        caption=text, parse_mode="HTML",
+                    )
+                else:
+                    await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
+                                           link_preview_options=_no_preview)
         else:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
                                    link_preview_options=_no_preview)

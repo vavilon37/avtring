@@ -350,8 +350,9 @@ class Monitor:
                     # Skip detail fetch entirely for confirmed companies — filtered anyway
                     if lst.get("seller_type") == "Компания":
                         return lst
-                    # Skip delay if XHR interception already gave us full data
-                    if not (lst.get("description") and lst.get("seller_name")):
+                    # Sleep only when list page gave no seller info at all;
+                    # if seller_name is known, Playwright list load already acts as delay
+                    if not lst.get("seller_name"):
                         await asyncio.sleep(random.uniform(1.5, 3.0) * self._delay_mult)
                     try:
                         enriched = await parser.fetch_listing_detail(lst)
