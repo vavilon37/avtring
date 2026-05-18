@@ -170,6 +170,9 @@ async def _handle_broadcast(msg: Message, state: FSMContext):
         await state.clear()
         await msg.answer("Отменено.")
         return
+    if not msg.text:
+        await msg.answer("Рассылка — только текстом. Пришли текст или /cancel.")
+        return
     await state.clear()
     users = await db.get_all_users()
     ok, fail = 0, 0

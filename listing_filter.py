@@ -199,8 +199,13 @@ def listing_datetime(listing: dict) -> datetime:
 def filter_listings(listings: list[dict]) -> list[dict]:
     """Pre-filter (list page data): accessories + age + title store keywords."""
     result = []
+    unparsed_dates = []
     for lst in listings:
         title = lst.get("title", "")
+
+        date_str = lst.get("date", "")
+        if date_str and _parse_avito_date(date_str) is None:
+            unparsed_dates.append(date_str)
 
         if is_accessory(lst):
             logger.debug(f"[filter] accessory: {title!r}")
@@ -216,6 +221,12 @@ def filter_listings(listings: list[dict]) -> list[dict]:
             continue
 
         result.append(lst)
+
+    if unparsed_dates:
+        logger.warning(
+            f"[date] {len(unparsed_dates)} listings with unrecognized date format — "
+            f"age filter could not drop them. Samples: {unparsed_dates[:3]}"
+        )
 
     skipped = len(listings) - len(result)
     if skipped:

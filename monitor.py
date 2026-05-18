@@ -41,7 +41,6 @@ class Monitor:
         self._last_break: float = 0.0
         self._last_expiry_check: float = 0.0
         self._expiry_notified: set[int] = set()
-        self._initialized_watches: set[int] = set()  # watches whose backlog is already silenced
 
     @property
     def _delay_mult(self) -> float:
@@ -327,20 +326,25 @@ class Monitor:
             to_enrich: dict[str, dict] = {}  # listing_id -> listing (unique across watches)
 
             for watch in watchers:
-                if watch["id"] not in self._initialized_watches:
-                    # First time seeing this watch — silently mark backlog as seen
+                if not watch.get("initialized"):
+                    # First time ever for this watch — silence its backlog once.
                     backlog = await db.filter_new_listings(watch["id"], listings, mark=False)
                     if backlog:
                         await mark_listings_seen(watch["id"], [l["id"] for l in backlog])
                         logger.info(
                             f"[init] watch {watch['id']}: silenced {len(backlog)} backlog listings"
                         )
-                    self._initialized_watches.add(watch["id"])
+                    await db.mark_watch_initialized(watch["id"])
                     per_watch[watch["id"]] = []
                     continue
 
                 new = await db.filter_new_listings(watch["id"], listings, mark=False)
                 new = filter_listings(new)
+                if len(new) > 15:
+                    logger.warning(
+                        f"[many-new] watch {watch['id']}: {len(new)} new listings in one cycle "
+                        f"(restart catch-up or seen_listings desync)"
+                    )
                 new.sort(key=listing_datetime, reverse=True)
                 top = new[:MAX_DETAIL_FETCH]
                 per_watch[watch["id"]] = top

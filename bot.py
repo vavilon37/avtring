@@ -91,6 +91,7 @@ def _register_handlers(dp: Dispatcher):
 
     dp.callback_query.register(_cb_delete,      F.data.startswith("del:"))
     dp.callback_query.register(_cb_check_payment, F.data.startswith("chkpay:"))
+    dp.callback_query.register(_cb_new_invoice, F.data == "new_invoice")
 
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
@@ -231,29 +232,16 @@ async def _cmd_help(msg: Message):
     )
 
 
-async def _cmd_sub(msg: Message):
-    await db.ensure_user(msg.from_user.id)
-    plan_str = await _plan_text(msg.from_user.id)
-
-    if await db.is_subscribed(msg.from_user.id):
-        await msg.answer(
-            f"{plan_str}\n\n"
-            "Хочешь продлить подписку ещё на 7 дней?",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"💳 Продлить за {PRICE_RUB}₽", callback_data="new_invoice")]
-            ]),
-        )
-        return
-
-    invoice = await create_invoice(msg.from_user.id)
+async def _send_invoice_card(message: Message, user_id: int, prefix: str = ""):
+    """Create a CryptoBot invoice and post the payment card."""
+    invoice = await create_invoice(user_id)
     if not invoice:
-        await msg.answer("❌ Ошибка при создании счёта. Попробуй позже.")
+        await message.answer("❌ Ошибка при создании счёта. Попробуй позже.")
         return
 
-    await db.save_invoice(invoice["invoice_id"], msg.from_user.id)
-    await msg.answer(
-        f"{plan_str}\n\n"
+    await db.save_invoice(invoice["invoice_id"], user_id)
+    await message.answer(
+        f"{prefix}"
         f"💎 <b>Подписка Avito Ringer</b>\n\n"
         f"• Проверка каждые <b>30 секунд</b>\n"
         f"• До <b>3 поисков</b> одновременно\n"
@@ -263,6 +251,34 @@ async def _cmd_sub(msg: Message):
         parse_mode="HTML",
         reply_markup=_kb_pay(invoice["pay_url"], invoice["invoice_id"]),
     )
+
+
+async def _cmd_sub(msg: Message):
+    await db.ensure_user(msg.from_user.id)
+    plan_str = await _plan_text(msg.from_user.id)
+
+    if await db.is_subscribed(msg.from_user.id):
+        await msg.answer(
+            f"{plan_str}\n\n"
+            f"Хочешь продлить подписку ещё на {SUBSCRIPTION_DAYS} дней?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"💳 Продлить за {PRICE_RUB}₽", callback_data="new_invoice")]
+            ]),
+        )
+        return
+
+    await _send_invoice_card(msg, msg.from_user.id, prefix=f"{plan_str}\n\n")
+
+
+async def _cb_new_invoice(cb: CallbackQuery):
+    await db.ensure_user(cb.from_user.id)
+    await cb.answer()
+    try:
+        await cb.message.edit_reply_markup()
+    except Exception:
+        pass
+    await _send_invoice_card(cb.message, cb.from_user.id)
 
 
 async def _cb_check_payment(cb: CallbackQuery):
@@ -352,6 +368,9 @@ async def _cb_storage(cb: CallbackQuery, state: FSMContext):
 
 
 async def _handle_price_min(msg: Message, state: FSMContext):
+    if not msg.text:
+        await msg.answer("Введи число цифрами — или 0, чтобы пропустить.")
+        return
     val = msg.text.strip().replace(" ", "")
     pmin = val if val.isdigit() and int(val) > 0 else ""
     await state.update_data(pmin=pmin)
@@ -364,6 +383,9 @@ async def _handle_price_min(msg: Message, state: FSMContext):
 
 
 async def _handle_price_max(msg: Message, state: FSMContext):
+    if not msg.text:
+        await msg.answer("Введи число цифрами — или 0, чтобы пропустить.")
+        return
     val = msg.text.strip().replace(" ", "")
     pmax = val if val.isdigit() and int(val) > 0 else ""
     await state.update_data(pmax=pmax)

@@ -71,6 +71,12 @@ async def init_db():
             await db.execute("ALTER TABLE watches ADD COLUMN storage_gb INTEGER DEFAULT 0")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE watches ADD COLUMN initialized INTEGER DEFAULT 0")
+            # Existing watches are already silenced; mark them so a restart won't re-silence.
+            await db.execute("UPDATE watches SET initialized = 1")
+        except Exception:
+            pass
         await db.commit()
     logger.info("Database initialized")
     await _migrate_slug_urls()
@@ -248,6 +254,13 @@ async def add_watch(user_id: int, url: str, label: str = "", storage_gb: int = 0
         )
         await db.commit()
         return cursor.lastrowid
+
+
+async def mark_watch_initialized(watch_id: int) -> None:
+    """Mark a watch as initialized so its backlog is silenced only once, ever."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE watches SET initialized = 1 WHERE id = ?", (watch_id,))
+        await db.commit()
 
 
 async def remove_watch(watch_id: int, user_id: int) -> bool:
