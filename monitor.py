@@ -430,6 +430,10 @@ class Monitor:
 
                     user_sent = self._tick_sent.setdefault(watch["user_id"], set())
                     if listing["id"] in user_sent:
+                        # Уже отправлено этому юзеру в этом цикле через другой поиск.
+                        # Помечаем виденным и для текущего поиска, иначе на следующем
+                        # цикле он распознает объявление как новое и пришлёт дубль.
+                        await mark_listings_seen(watch["id"], [listing["id"]])
                         continue
                     user_sent.add(listing["id"])
                     await mark_listings_seen(watch["id"], [listing["id"]])
