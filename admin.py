@@ -17,6 +17,9 @@ from database import OWNER_IDS, TRIAL_DAYS, SUBSCRIPTION_DAYS
 
 logger = logging.getLogger(__name__)
 
+# Кнопка админки в главном меню (видна только главному админу).
+BTN_ADMIN = "🔧 Админка"
+
 _monitor = None
 
 
@@ -282,6 +285,7 @@ async def _cb_gitpull(cb: CallbackQuery):
 
 def register_admin_handlers(dp: Dispatcher):
     dp.message.register(_cmd_admin, Command("admin"))
+    dp.message.register(_cmd_admin, F.text == BTN_ADMIN)
     dp.callback_query.register(_cb_stats,     F.data == "adm:stats")
     dp.callback_query.register(_cb_users,     F.data.startswith("adm:users:"))
     dp.callback_query.register(_cb_broadcast, F.data == "adm:broadcast")

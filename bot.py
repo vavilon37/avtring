@@ -1,7 +1,7 @@
 import logging
 import httpx
 from datetime import datetime, timezone, timedelta
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery,
@@ -21,7 +21,7 @@ from filters import (
     PHONE_MODELS, CONDITIONS, SELLER_TYPES, CITIES, STORAGE_OPTIONS,
     build_avito_url, label_from_filters,
 )
-from payments import create_invoice, check_invoice, PRICE_RUB, SUBSCRIPTION_DAYS
+from admin import BTN_ADMIN
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,6 @@ def set_monitor(monitor) -> None:
 BTN_ADD  = "➕ Добавить поиск"
 BTN_LIST = "📋 Мои поиски"
 BTN_STOP = "🗑 Удалить поиск"
-BTN_SUB  = "💎 Подписка"
 BTN_REF  = "🔗 Пригласить друга"
 BTN_HELP = "❓ Помощь"
 
@@ -52,6 +51,22 @@ class AddWatch(StatesGroup):
     city      = State()
 
 
+# ── Admin-only lock (temporary) ──────────────────────────────────────────────
+
+class AdminOnlyMiddleware(BaseMiddleware):
+    """Временная блокировка: ботом может пользоваться только администратор."""
+
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if user is not None and user.id != OWNER_ID:
+            if isinstance(event, CallbackQuery):
+                await event.answer("🚧 Бот временно недоступен", show_alert=True)
+            elif isinstance(event, Message):
+                await event.answer("🚧 Бот временно недоступен. Загляни позже.")
+            return None
+        return await handler(event, data)
+
+
 # ── Bot factory ──────────────────────────────────────────────────────────────
 
 
@@ -63,12 +78,15 @@ def make_bot(token: str, session=None) -> tuple[Bot, Dispatcher]:
 
 
 def _register_handlers(dp: Dispatcher):
+    # Временная блокировка: пускаем в бот только администратора.
+    dp.message.outer_middleware(AdminOnlyMiddleware())
+    dp.callback_query.outer_middleware(AdminOnlyMiddleware())
+
     dp.message.register(_cmd_start, CommandStart())
     dp.message.register(_cmd_help,  Command("help"))
     dp.message.register(_cmd_add,   Command("add"))
     dp.message.register(_cmd_list,  Command("list"))
     dp.message.register(_cmd_stop,  Command("stop"))
-    dp.message.register(_cmd_sub,   Command("sub"))
     dp.message.register(_cmd_ref,   Command("ref"))
     dp.message.register(_cmd_pause,  Command("pause"))
     dp.message.register(_cmd_resume, Command("resume"))
@@ -76,7 +94,6 @@ def _register_handlers(dp: Dispatcher):
     dp.message.register(_cmd_add,  F.text == BTN_ADD)
     dp.message.register(_cmd_list, F.text == BTN_LIST)
     dp.message.register(_cmd_stop, F.text == BTN_STOP)
-    dp.message.register(_cmd_sub,  F.text == BTN_SUB)
     dp.message.register(_cmd_ref,  F.text == BTN_REF)
     dp.message.register(_cmd_help, F.text == BTN_HELP)
 
@@ -90,19 +107,20 @@ def _register_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_city,      F.data.startswith("city:"),   AddWatch.city)
 
     dp.callback_query.register(_cb_delete,      F.data.startswith("del:"))
-    dp.callback_query.register(_cb_check_payment, F.data.startswith("chkpay:"))
-    dp.callback_query.register(_cb_new_invoice, F.data == "new_invoice")
 
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
 
-def _main_menu() -> ReplyKeyboardMarkup:
+def _main_menu(user_id: int) -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(text=BTN_ADD),  KeyboardButton(text=BTN_LIST)],
+        [KeyboardButton(text=BTN_STOP), KeyboardButton(text=BTN_REF)],
+        [KeyboardButton(text=BTN_HELP)],
+    ]
+    if user_id == OWNER_ID:
+        keyboard.append([KeyboardButton(text=BTN_ADMIN)])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_ADD),  KeyboardButton(text=BTN_LIST)],
-            [KeyboardButton(text=BTN_STOP), KeyboardButton(text=BTN_SUB)],
-            [KeyboardButton(text=BTN_REF),  KeyboardButton(text=BTN_HELP)],
-        ],
+        keyboard=keyboard,
         resize_keyboard=True,
         persistent=True,
     )
@@ -142,13 +160,6 @@ def _kb_cities() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=name, callback_data=f"city:{val}")]
         for name, val in CITIES.items()
-    ])
-
-
-def _kb_pay(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить {PRICE_RUB}₽", url=pay_url)],
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"chkpay:{invoice_id}")],
     ])
 
 
@@ -213,7 +224,7 @@ async def _cmd_start(msg: Message):
         "и сразу присылаю карточку с фото и всеми характеристиками.\n\n"
         f"🎁 <b>{TRIAL_DAYS} день бесплатно</b> — можешь попробовать прямо сейчас!"
     )
-    await msg.answer(welcome, parse_mode="HTML", reply_markup=_main_menu())
+    await msg.answer(welcome, parse_mode="HTML", reply_markup=_main_menu(msg.from_user.id))
 
 
 async def _cmd_help(msg: Message):
@@ -224,80 +235,10 @@ async def _cmd_help(msg: Message):
         "3. Бот мониторит Авито и присылает новые объявления\n"
         "4. При новом объявлении — сразу пришлю карточку с фото, "
         "характеристиками, описанием и ценой\n\n"
-        "<b>Подписка:</b>\n"
-        f"💎 {PRICE_RUB}₽/{SUBSCRIPTION_DAYS} дней — до {PAID_MAX_WATCHES} поисков, проверка каждые 30 сек\n\n"
         "Удалить поиск — <b>🗑 Удалить поиск</b>.",
         parse_mode="HTML",
-        reply_markup=_main_menu(),
+        reply_markup=_main_menu(msg.from_user.id),
     )
-
-
-async def _send_invoice_card(message: Message, user_id: int, prefix: str = ""):
-    """Create a CryptoBot invoice and post the payment card."""
-    invoice = await create_invoice(user_id)
-    if not invoice:
-        await message.answer("❌ Ошибка при создании счёта. Попробуй позже.")
-        return
-
-    await db.save_invoice(invoice["invoice_id"], user_id)
-    await message.answer(
-        f"{prefix}"
-        f"💎 <b>Подписка Avito Ringer</b>\n\n"
-        f"• Проверка каждые <b>30 секунд</b>\n"
-        f"• До <b>3 поисков</b> одновременно\n"
-        f"• Срок: <b>{SUBSCRIPTION_DAYS} дней</b>\n"
-        f"• Цена: <b>{PRICE_RUB}₽</b>\n\n"
-        f"Оплата через @CryptoBot — безопасно и мгновенно.",
-        parse_mode="HTML",
-        reply_markup=_kb_pay(invoice["pay_url"], invoice["invoice_id"]),
-    )
-
-
-async def _cmd_sub(msg: Message):
-    await db.ensure_user(msg.from_user.id)
-    plan_str = await _plan_text(msg.from_user.id)
-
-    if await db.is_subscribed(msg.from_user.id):
-        await msg.answer(
-            f"{plan_str}\n\n"
-            f"Хочешь продлить подписку ещё на {SUBSCRIPTION_DAYS} дней?",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"💳 Продлить за {PRICE_RUB}₽", callback_data="new_invoice")]
-            ]),
-        )
-        return
-
-    await _send_invoice_card(msg, msg.from_user.id, prefix=f"{plan_str}\n\n")
-
-
-async def _cb_new_invoice(cb: CallbackQuery):
-    await db.ensure_user(cb.from_user.id)
-    await cb.answer()
-    try:
-        await cb.message.edit_reply_markup()
-    except Exception:
-        pass
-    await _send_invoice_card(cb.message, cb.from_user.id)
-
-
-async def _cb_check_payment(cb: CallbackQuery):
-    invoice_id = cb.data.split(":", 1)[1]
-    await cb.answer("Проверяю оплату...", show_alert=False)
-
-    paid = await check_invoice(invoice_id)
-    if paid:
-        user_id = cb.from_user.id
-        expires = await db.activate_subscription(user_id)
-        expires_str = expires.strftime("%d.%m.%Y")
-        await cb.message.edit_text(
-            f"✅ <b>Подписка активирована!</b>\n\n"
-            f"Действует до <b>{expires_str}</b>\n"
-            f"Проверка каждые 30 секунд, до 3 поисков.",
-            parse_mode="HTML",
-        )
-    else:
-        await cb.answer("❌ Оплата не найдена. Попробуй через минуту.", show_alert=True)
 
 
 # ── Add watch FSM ─────────────────────────────────────────────────────────────
@@ -308,11 +249,10 @@ async def _cmd_add(msg: Message, state: FSMContext):
 
     if plan == "free":
         await msg.answer(
-            f"🔒 <b>Пробный период закончился</b>\n\n"
-            f"Оформи подписку 💎 за {PRICE_RUB}₽/{SUBSCRIPTION_DAYS} дней — до {PAID_MAX_WATCHES} поисков, проверка каждые 30 сек.\n\n"
-            f"Или пригласи друга — получи <b>+1 день</b> бесплатно 🔗",
+            "🔒 <b>Пробный период закончился</b>\n\n"
+            "Пригласи друга — получи <b>+1 день</b> бесплатно 🔗",
             parse_mode="HTML",
-            reply_markup=_main_menu(),
+            reply_markup=_main_menu(msg.from_user.id),
         )
         return
 
@@ -322,7 +262,7 @@ async def _cmd_add(msg: Message, state: FSMContext):
     if len(watches) >= max_w:
         await msg.answer(
             f"❌ Максимум {max_w} поисков. Удали старый.",
-            reply_markup=_main_menu(),
+            reply_markup=_main_menu(msg.from_user.id),
         )
         return
 
@@ -450,7 +390,7 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
         f"🔍 {label}\n\n"
         f"Мониторю Авито {interval_note}. Как появится новое объявление — сразу пришлю.",
         parse_mode="HTML",
-        reply_markup=_main_menu(),
+        reply_markup=_main_menu(cb.from_user.id),
     )
 
     if _monitor:
@@ -474,7 +414,7 @@ async def _cmd_pause(msg: Message):
         "⏸ <b>Мониторинг поставлен на паузу</b>\n\n"
         "Уведомления не будут приходить. Чтобы возобновить — /resume",
         parse_mode="HTML",
-        reply_markup=_main_menu(),
+        reply_markup=_main_menu(msg.from_user.id),
     )
 
 
@@ -487,7 +427,7 @@ async def _cmd_resume(msg: Message):
     await msg.answer(
         "▶️ <b>Мониторинг возобновлён</b>\n\nСнова слежу за объявлениями.",
         parse_mode="HTML",
-        reply_markup=_main_menu(),
+        reply_markup=_main_menu(msg.from_user.id),
     )
 
 
@@ -504,7 +444,7 @@ async def _cmd_ref(msg: Message):
         f"Твоя ссылка:\n<code>{link}</code>\n\n"
         f"Приглашено друзей: <b>{count}</b>",
         parse_mode="HTML",
-        reply_markup=_main_menu(),
+        reply_markup=_main_menu(msg.from_user.id),
     )
 
 
@@ -517,20 +457,20 @@ async def _cmd_list(msg: Message):
         await msg.answer(
             f"{plan_str}\n\nУ тебя пока нет поисков. Нажми ➕ Добавить поиск.",
             parse_mode="HTML",
-            reply_markup=_main_menu(),
+            reply_markup=_main_menu(msg.from_user.id),
         )
         return
     text = f"{plan_str}\n\n📋 <b>Твои поиски:</b>\n\n"
     for w in watches:
         name = w["label"] or f"Поиск #{w['id']}"
         text += f"<b>#{w['id']}</b> {name}\n"
-    await msg.answer(text, parse_mode="HTML", reply_markup=_main_menu())
+    await msg.answer(text, parse_mode="HTML", reply_markup=_main_menu(msg.from_user.id))
 
 
 async def _cmd_stop(msg: Message):
     watches = await db.get_user_watches(msg.from_user.id)
     if not watches:
-        await msg.answer("У тебя нет активных поисков.", reply_markup=_main_menu())
+        await msg.answer("У тебя нет активных поисков.", reply_markup=_main_menu(msg.from_user.id))
         return
     kb_buttons = []
     for w in watches:

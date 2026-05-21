@@ -192,13 +192,7 @@ class Monitor:
             if self._last_break == 0:
                 self._last_break = real_now
 
-            # Subscription expiry notifications (once per hour)
-            if real_now - self._last_expiry_check > 3600:
-                self._last_expiry_check = real_now
-                try:
-                    await self._check_expiring_subscriptions()
-                except Exception:
-                    pass
+            # Уведомления о продлении отключены — покупка подписки убрана.
 
             try:
                 found_any = await self._tick()
