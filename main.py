@@ -20,6 +20,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Кольцевой буфер логов для просмотра из админки (после basicConfig).
+admin_module.setup_log_buffer()
+
 
 async def main():
     token = os.getenv("BOT_TOKEN")

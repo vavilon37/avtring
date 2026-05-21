@@ -1,14 +1,18 @@
 import asyncio
+import html
 import logging
 import os
 import subprocess
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -21,6 +25,29 @@ logger = logging.getLogger(__name__)
 BTN_ADMIN = "🔧 Админка"
 
 _monitor = None
+
+
+# ── Буфер логов в памяти (для просмотра логов из админки) ─────────────────────
+
+_LOG_BUFFER: deque = deque(maxlen=400)
+
+
+class _BufferLogHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            _LOG_BUFFER.append(self.format(record))
+        except Exception:
+            pass
+
+
+def setup_log_buffer() -> None:
+    """Подключает кольцевой буфер логов к корневому логгеру. Вызывать после basicConfig."""
+    handler = _BufferLogHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
+    )
+    logging.getLogger().addHandler(handler)
 
 
 def set_monitor(monitor) -> None:
@@ -62,6 +89,12 @@ async def _stats_text() -> str:
     sent = _monitor._sent_today if _monitor else 0
     mult = _monitor._delay_mult if _monitor else 1.0
     parser_ok = (any(_monitor._parsers_started) if _monitor else False)
+    if _monitor and _monitor._paused:
+        parser_status = "⏸ на паузе"
+    elif parser_ok:
+        parser_status = "✅ работает"
+    else:
+        parser_status = "❌ остановлен"
     return (
         "🔧 <b>Панель администратора</b>\n\n"
         f"👥 Пользователей: <b>{stats['total_users']}</b>  (платных: <b>{stats['paid_users']}</b>)\n"
@@ -70,12 +103,17 @@ async def _stats_text() -> str:
         f"🔎 Найдено сегодня: <b>{stats['seen_today']}</b>\n"
         f"🚫 Блокировок сегодня: <b>{blocks}</b>  "
         f"{'(задержки ×' + str(mult) + ')' if mult > 1 else ''}\n"
-        f"⚙️ Парсер: <b>{'✅ работает' if parser_ok else '❌ остановлен'}</b>\n"
+        f"⚙️ Парсер: <b>{parser_status}</b>\n"
         f"⏱ Аптайм: <b>{h}ч {m}м {s}с</b>"
     )
 
 
 def _admin_kb() -> InlineKeyboardMarkup:
+    paused = bool(_monitor and _monitor._paused)
+    parser_btn = InlineKeyboardButton(
+        text="▶️ Запустить парсер" if paused else "⏸ Остановить парсер",
+        callback_data="adm:parser",
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🔄 Обновить", callback_data="adm:stats"),
@@ -85,7 +123,19 @@ def _admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📢 Рассылка", callback_data="adm:broadcast"),
             InlineKeyboardButton(text="🎁 Выдать дни", callback_data="adm:give"),
         ],
-        [InlineKeyboardButton(text="🔄 Перезапустить парсер", callback_data="adm:restart")],
+        [
+            InlineKeyboardButton(text="📋 Все поиски", callback_data="adm:allwatches:0"),
+            InlineKeyboardButton(text="📜 Логи", callback_data="adm:logs"),
+        ],
+        [parser_btn],
+        [
+            InlineKeyboardButton(text="🔄 Рестарт парсера", callback_data="adm:restart"),
+            InlineKeyboardButton(text="🧹 Очистить кэш", callback_data="adm:clearcache"),
+        ],
+        [
+            InlineKeyboardButton(text="💾 Бэкап БД", callback_data="adm:backup"),
+            InlineKeyboardButton(text="🔁 Рестарт бота", callback_data="adm:reboot"),
+        ],
         [InlineKeyboardButton(text="⬇️ Git Pull + перезапуск", callback_data="adm:gitpull")],
     ])
 
@@ -242,6 +292,7 @@ async def _cb_restart(cb: CallbackQuery):
         return await cb.answer()
     await cb.answer("Перезапускаю...", show_alert=False)
     if _monitor:
+        _monitor._paused = False
         try:
             for i, parser in enumerate(_monitor._parsers):
                 if _monitor._parsers_started[i]:
@@ -281,6 +332,158 @@ async def _cb_gitpull(cb: CallbackQuery):
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+# ── Контроль системы (блок C) ─────────────────────────────────────────────────
+
+async def _cb_parser_toggle(cb: CallbackQuery):
+    if cb.from_user.id not in OWNER_IDS:
+        return await cb.answer()
+    if not _monitor:
+        return await cb.answer("❌ Монитор не найден", show_alert=True)
+    if _monitor._paused:
+        await _monitor.resume_parser()
+        await cb.answer("▶️ Парсер запущен")
+    else:
+        await cb.answer("⏸ Останавливаю парсер...")
+        await _monitor.pause_parser()
+    try:
+        await cb.message.edit_text(await _stats_text(), parse_mode="HTML", reply_markup=_admin_kb())
+    except Exception:
+        pass
+
+
+async def _cb_reboot(cb: CallbackQuery):
+    if cb.from_user.id not in OWNER_IDS:
+        return await cb.answer()
+    await cb.answer("Перезапускаю бота...", show_alert=False)
+    await cb.message.answer("🔁 Перезапускаю бота...")
+    await asyncio.sleep(1)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+async def _cb_backup(cb: CallbackQuery):
+    if cb.from_user.id not in OWNER_IDS:
+        return await cb.answer()
+    await cb.answer("Создаю бэкап...")
+    path = None
+    try:
+        path = await db.backup_database()
+        size_kb = os.path.getsize(path) / 1024
+        await cb.message.answer_document(
+            FSInputFile(path, filename=os.path.basename(path)),
+            caption=f"💾 Бэкап базы · {size_kb:.0f} КБ",
+        )
+    except Exception as e:
+        await cb.message.answer(f"❌ Ошибка бэкапа: {e}")
+    finally:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+
+async def _cb_logs(cb: CallbackQuery):
+    if cb.from_user.id not in OWNER_IDS:
+        return await cb.answer()
+    await cb.answer()
+    lines = list(_LOG_BUFFER)[-40:]
+    if not lines:
+        await cb.message.answer("📜 Логи пусты.")
+        return
+    body = "\n".join(lines)
+    if len(body) > 3000:
+        body = body[-3000:]
+    await cb.message.answer(
+        f"📜 <b>Последние логи</b>\n\n<pre>{html.escape(body)}</pre>",
+        parse_mode="HTML",
+    )
+
+
+async def _cb_clearcache(cb: CallbackQuery):
+    if cb.from_user.id not in OWNER_IDS:
+        return await cb.answer()
+    await cb.answer()
+    await cb.message.answer(
+        "🧹 <b>Очистить кэш виденных объявлений?</b>\n\n"
+        "Таблица <code>seen_listings</code> будет очищена, поиски — переинициализированы. "
+        "Спама не будет: на ближайшем цикле бэклог снова молча пометится виденным.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да, очистить", callback_data="adm:clearcache_yes"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="adm:stats"),
+        ]]),
+    )
+
+
+async def _cb_clearcache_yes(cb: CallbackQuery):
+    if cb.from_user.id not in OWNER_IDS:
+        return await cb.answer()
+    deleted = await db.clear_seen_cache()
+    await cb.answer("Кэш очищен")
+    try:
+        await cb.message.edit_text(
+            f"🧹 <b>Кэш очищен</b>\n\nУдалено записей: <b>{deleted}</b>. "
+            f"Поиски переинициализируются на ближайшем цикле.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+async def _render_allwatches(message: Message, page: int):
+    watches = await db.get_all_watches()
+    per_page = 8
+    total_pages = max(1, (len(watches) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    chunk = watches[page * per_page:(page + 1) * per_page]
+
+    lines = [f"📋 <b>Все поиски ({len(watches)})</b>  стр. {page + 1}/{total_pages}\n"]
+    rows = []
+    for w in chunk:
+        label = w["label"] or f"Поиск #{w['id']}"
+        lines.append(f"<b>#{w['id']}</b> · <code>{w['user_id']}</code> · {html.escape(label)}")
+        rows.append([InlineKeyboardButton(
+            text=f"🗑 #{w['id']} {label[:28]}",
+            callback_data=f"adm:delwatch:{w['id']}:{page}",
+        )])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm:allwatches:{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm:allwatches:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="adm:stats")])
+
+    text = "\n".join(lines) if len(lines) > 1 else "📋 Поисков нет."
+    try:
+        await message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+    except Exception:
+        pass
+
+
+async def _cb_allwatches(cb: CallbackQuery):
+    if cb.from_user.id not in OWNER_IDS:
+        return await cb.answer()
+    page = int(cb.data.split(":")[-1])
+    await _render_allwatches(cb.message, page)
+    await cb.answer()
+
+
+async def _cb_delwatch(cb: CallbackQuery):
+    if cb.from_user.id not in OWNER_IDS:
+        return await cb.answer()
+    parts = cb.data.split(":")
+    watch_id, page = int(parts[2]), int(parts[3])
+    removed = await db.remove_watch_by_id(watch_id)
+    await cb.answer(f"Поиск #{watch_id} удалён" if removed else "Не найдено")
+    await _render_allwatches(cb.message, page)
+
+
 # ── Register ──────────────────────────────────────────────────────────────────
 
 def register_admin_handlers(dp: Dispatcher):
@@ -292,5 +495,13 @@ def register_admin_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_give,      F.data == "adm:give")
     dp.callback_query.register(_cb_restart,  F.data == "adm:restart")
     dp.callback_query.register(_cb_gitpull, F.data == "adm:gitpull")
+    dp.callback_query.register(_cb_parser_toggle,  F.data == "adm:parser")
+    dp.callback_query.register(_cb_reboot,         F.data == "adm:reboot")
+    dp.callback_query.register(_cb_backup,         F.data == "adm:backup")
+    dp.callback_query.register(_cb_logs,           F.data == "adm:logs")
+    dp.callback_query.register(_cb_clearcache,     F.data == "adm:clearcache")
+    dp.callback_query.register(_cb_clearcache_yes, F.data == "adm:clearcache_yes")
+    dp.callback_query.register(_cb_allwatches, F.data.startswith("adm:allwatches:"))
+    dp.callback_query.register(_cb_delwatch,   F.data.startswith("adm:delwatch:"))
     dp.message.register(_handle_broadcast, AdminState.broadcast)
     dp.message.register(_handle_give,      AdminState.give)

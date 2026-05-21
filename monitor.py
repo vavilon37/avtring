@@ -28,6 +28,7 @@ class Monitor:
         ]
         self._parsers_started = [False]
         self._running = False
+        self._paused = False  # парсер остановлен админом из панели
         self._task: asyncio.Task | None = None
         self._block_alerted: bool = False
         self._last_cleanup: float = 0
@@ -162,6 +163,23 @@ class Monitor:
                 self._parsers_started[i] = False
         logger.info("Monitor stopped")
 
+    async def pause_parser(self):
+        """Остановить парсер по команде админа — цикл не будет проверять Авито."""
+        self._paused = True
+        for i, parser in enumerate(self._parsers):
+            if self._parsers_started[i]:
+                try:
+                    await asyncio.wait_for(parser.stop(), timeout=15)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Parser {i} did not stop within 15s")
+                self._parsers_started[i] = False
+        logger.info("Parser paused by admin")
+
+    async def resume_parser(self):
+        """Возобновить парсер — цикл сам перезапустит парсеры на ближайшем тике."""
+        self._paused = False
+        logger.info("Parser resumed by admin")
+
     async def _ensure_parsers(self, has_watches: bool):
         for i, parser in enumerate(self._parsers):
             if has_watches and not self._parsers_started[i]:
@@ -193,6 +211,10 @@ class Monitor:
                 self._last_break = real_now
 
             # Уведомления о продлении отключены — покупка подписки убрана.
+
+            if self._paused:
+                await asyncio.sleep(5)
+                continue
 
             try:
                 found_any = await self._tick()

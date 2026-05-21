@@ -277,6 +277,15 @@ async def remove_watch(watch_id: int, user_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+async def remove_watch_by_id(watch_id: int) -> bool:
+    """Админское удаление поиска без проверки владельца."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("DELETE FROM watches WHERE id = ?", (watch_id,))
+        await db.execute("DELETE FROM seen_listings WHERE watch_id = ?", (watch_id,))
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def get_user_watches(user_id: int) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -328,6 +337,30 @@ async def clean_old_seen_listings(days: int = 30):
         await db.commit()
         if cursor.rowcount:
             logger.info(f"Cleaned {cursor.rowcount} old seen_listings entries")
+
+
+async def clear_seen_cache() -> int:
+    """Полностью очищает кэш виденных объявлений и переинициализирует поиски.
+
+    Спама не будет: на следующем цикле бэклог каждого поиска снова молча
+    пометится как виденный (см. ветку `initialized` в monitor._check_url_group).
+    Возвращает число удалённых записей.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("DELETE FROM seen_listings")
+        await db.execute("UPDATE watches SET initialized = 0")
+        await db.commit()
+        logger.info(f"Seen cache cleared: {cursor.rowcount} entries removed")
+        return cursor.rowcount
+
+
+async def backup_database() -> str:
+    """Делает живую консистентную копию БД и возвращает путь к файлу."""
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_path = f"/tmp/avito_ringer_backup_{ts}.db"
+    async with aiosqlite.connect(DB_PATH) as src, aiosqlite.connect(backup_path) as dst:
+        await src.backup(dst)
+    return backup_path
 
 
 async def pause_user(user_id: int):
