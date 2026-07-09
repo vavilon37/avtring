@@ -1,5 +1,7 @@
 import aiosqlite
 import logging
+import re
+from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
@@ -15,6 +17,24 @@ SUBSCRIPTION_DAYS = 5
 
 OWNER_ID = 8501271486  # @yodealer
 OWNER_IDS = {OWNER_ID}
+
+FEE_RATE = 0.05  # доля владельца парсера с маржи по «ботовским» сделкам
+
+
+def extract_item_id(url: str) -> str | None:
+    """Достаёт Avito item_id из ссылки объявления.
+
+    Ссылка вида .../telefony/apple_iphone_13_128_gb_4567890123?context=...
+    → item_id = последнее число в пути. Совпадает с listing["id"] парсера.
+    """
+    if not url:
+        return None
+    path = urlparse(url.strip()).path
+    m = re.search(r"_(\d+)/?$", path)
+    if m:
+        return m.group(1)
+    nums = re.findall(r"\d{6,}", path)
+    return nums[-1] if nums else None
 
 
 async def init_db():
@@ -52,8 +72,50 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # --- Учёт находок и атрибуция (перепродажа телефонов) ---
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS resellers (
+                user_id INTEGER PRIMARY KEY,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sent_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id TEXT NOT NULL,
+                buyer_id INTEGER NOT NULL,
+                watch_id INTEGER,
+                price TEXT,
+                title TEXT,
+                link TEXT,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS deals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id TEXT,
+                url TEXT,
+                buy_price INTEGER,
+                sell_price INTEGER,
+                status TEXT NOT NULL DEFAULT 'open',
+                attributed INTEGER NOT NULL DEFAULT 0,
+                buyer_hint TEXT,
+                note TEXT,
+                fee INTEGER,
+                reseller_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sold_at TIMESTAMP
+            )
+        """)
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_seen_watch ON seen_listings(watch_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sent_listing ON sent_items(listing_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_deals_status ON deals(status)"
         )
         try:
             await db.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
@@ -474,3 +536,170 @@ async def mark_listings_seen(watch_id: int, listing_ids: list[str]):
             [(watch_id, lid) for lid in listing_ids],
         )
         await db.commit()
+
+
+# ── Роль реселлера ──────────────────────────────────────────────────────────
+
+async def add_reseller(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO resellers (user_id) VALUES (?)", (user_id,))
+        await db.commit()
+
+
+async def remove_reseller(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM resellers WHERE user_id = ?", (user_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def is_reseller(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM resellers WHERE user_id = ?", (user_id,)) as cur:
+            return await cur.fetchone() is not None
+
+
+async def get_resellers() -> list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM resellers") as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+# ── Журнал присланного байерам (основа атрибуции) ───────────────────────────
+
+async def log_sent_item(listing: dict, buyer_id: int, watch_id: int | None = None):
+    """Фиксирует объявление, реально отправленное байеру. Вызывать в точке отправки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO sent_items (listing_id, buyer_id, watch_id, price, title, link) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (str(listing.get("id")), buyer_id, watch_id,
+             listing.get("price"), listing.get("title"), listing.get("link")),
+        )
+        await db.commit()
+
+
+async def find_sent(item_id: str) -> dict | None:
+    """Самая ранняя отправка этого item_id (любому байеру), либо None.
+
+    Правило атрибуции: если item_id есть в присланном — сделка «через бота».
+    """
+    if not item_id:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM sent_items WHERE listing_id = ? ORDER BY sent_at ASC LIMIT 1",
+            (str(item_id),),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+# ── Сделки (закуп → продажа → 5%) ───────────────────────────────────────────
+
+async def add_deal(url: str, buy_price: int, reseller_id: int,
+                   buyer_hint: str = "", note: str = "") -> dict:
+    """Заводит закуп. Атрибуция считается автоматически по журналу присланного."""
+    item_id = extract_item_id(url)
+    sent = await find_sent(item_id) if item_id else None
+    attributed = 1 if sent else 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO deals (item_id, url, buy_price, reseller_id, buyer_hint, note, attributed) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (item_id, url, buy_price, reseller_id, buyer_hint, note, attributed),
+        )
+        await db.commit()
+        deal_id = cur.lastrowid
+    return {
+        "id": deal_id, "item_id": item_id, "url": url, "buy_price": buy_price,
+        "attributed": attributed, "sent": sent,
+        "title": (sent or {}).get("title"),
+    }
+
+
+async def mark_deal_sold(deal_id: int, sell_price: int) -> dict | None:
+    """Закрывает сделку продажей, считает маржу и 5% (только для attributed)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        deal = dict(row)
+        if deal["status"] == "sold":
+            return None
+        margin = (sell_price or 0) - (deal["buy_price"] or 0)
+        fee = round(margin * FEE_RATE) if deal["attributed"] and margin > 0 else 0
+        await db.execute(
+            "UPDATE deals SET sell_price = ?, status = 'sold', fee = ?, sold_at = ? WHERE id = ?",
+            (sell_price, fee, datetime.now(timezone.utc).isoformat(), deal_id),
+        )
+        await db.commit()
+    deal.update(sell_price=sell_price, status="sold", fee=fee, margin=margin)
+    return deal
+
+
+async def get_deal(deal_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def get_open_deals(reseller_id: int | None = None) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if reseller_id is not None:
+            q = ("SELECT * FROM deals WHERE status = 'open' AND reseller_id = ? "
+                 "ORDER BY created_at DESC")
+            args: tuple = (reseller_id,)
+        else:
+            q = "SELECT * FROM deals WHERE status = 'open' ORDER BY created_at DESC"
+            args = ()
+        async with db.execute(q, args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_owner_report(days: int | None = None) -> dict:
+    """Сводка по твоим 5%: только проданные ботовские сделки."""
+    where = "status = 'sold' AND attributed = 1"
+    args: list = []
+    if days:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        where += " AND sold_at >= ?"
+        args.append(cutoff)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT COUNT(*) AS n, "
+            f"COALESCE(SUM(sell_price - buy_price), 0) AS margin, "
+            f"COALESCE(SUM(fee), 0) AS fee FROM deals WHERE {where}",
+            args,
+        ) as cur:
+            agg = dict(await cur.fetchone())
+        async with db.execute(
+            f"SELECT * FROM deals WHERE {where} ORDER BY sold_at DESC LIMIT 20", args
+        ) as cur:
+            deals = [dict(r) for r in await cur.fetchall()]
+    return {"count": agg["n"], "margin": agg["margin"], "fee": agg["fee"], "deals": deals}
+
+
+async def get_reseller_report(reseller_id: int) -> dict:
+    """Личная сводка реселлера по всем его сделкам (и ботовским, и своим)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT "
+            "  COALESCE(SUM(status = 'open'), 0)  AS open_cnt, "
+            "  COALESCE(SUM(status = 'sold'), 0)  AS sold_cnt, "
+            "  COALESCE(SUM(CASE WHEN status='sold' THEN sell_price - buy_price END), 0) AS margin, "
+            "  COALESCE(SUM(CASE WHEN status='sold' AND attributed=1 THEN 1 ELSE 0 END), 0) AS bot_sold, "
+            "  COALESCE(SUM(CASE WHEN status='sold' AND attributed=1 THEN fee END), 0)     AS fee "
+            "FROM deals WHERE reseller_id = ?",
+            (reseller_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return dict(row) if row else {}

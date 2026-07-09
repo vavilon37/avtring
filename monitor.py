@@ -438,6 +438,11 @@ class Monitor:
                     user_sent.add(listing["id"])
                     await mark_listings_seen(watch["id"], [listing["id"]])
                     await send_listing(self.bot, watch["user_id"], listing, label)
+                    # Журнал реально присланного байеру — основа атрибуции 5%.
+                    try:
+                        await db.log_sent_item(listing, watch["user_id"], watch["id"])
+                    except Exception as e:
+                        logger.warning(f"log_sent_item failed for {listing.get('id')}: {e}")
                     self._sent_today += 1
                     await asyncio.sleep(0.4)
 

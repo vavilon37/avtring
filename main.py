@@ -7,6 +7,7 @@ from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 import bot as bot_module
 import admin as admin_module
+import deals as deals_module
 from bot import make_bot
 from database import init_db
 from monitor import Monitor
@@ -40,6 +41,7 @@ async def main():
     bot_module.set_monitor(monitor)
     admin_module.set_monitor(monitor)
     admin_module.register_admin_handlers(dp)
+    deals_module.register_deal_handlers(dp)
     await monitor.start()
     logger.info("Bot started. Press Ctrl+C to stop.")
 

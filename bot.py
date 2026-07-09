@@ -54,16 +54,17 @@ class AddWatch(StatesGroup):
 # ── Admin-only lock (temporary) ──────────────────────────────────────────────
 
 class AdminOnlyMiddleware(BaseMiddleware):
-    """Временная блокировка: ботом может пользоваться только администратор."""
+    """Временная блокировка: ботом пользуются только владелец и реселлеры."""
 
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
         if user is not None and user.id != OWNER_ID:
-            if isinstance(event, CallbackQuery):
-                await event.answer("🚧 Бот временно недоступен", show_alert=True)
-            elif isinstance(event, Message):
-                await event.answer("🚧 Бот временно недоступен. Загляни позже.")
-            return None
+            if not await db.is_reseller(user.id):
+                if isinstance(event, CallbackQuery):
+                    await event.answer("🚧 Бот временно недоступен", show_alert=True)
+                elif isinstance(event, Message):
+                    await event.answer("🚧 Бот временно недоступен. Загляни позже.")
+                return None
         return await handler(event, data)
 
 
@@ -196,6 +197,12 @@ async def _max_watches(user_id: int) -> int:
 
 async def _cmd_start(msg: Message):
     is_new = await db.ensure_user(msg.from_user.id)
+
+    # Реселлер (не владелец) видит своё меню учёта сделок, а не байерский экран.
+    if msg.from_user.id != OWNER_ID and await db.is_reseller(msg.from_user.id):
+        from deals import reseller_menu, RESELLER_WELCOME
+        await msg.answer(RESELLER_WELCOME, parse_mode="HTML", reply_markup=reseller_menu())
+        return
 
     # Parse referral payload: /start ref1234567890
     referrer_id = None
