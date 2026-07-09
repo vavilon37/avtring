@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 BTN_DEAL_BUY    = "➕ Закуп"
 BTN_DEAL_SELL   = "✅ Продать"
 BTN_DEAL_STATS  = "📊 Моя статистика"
+BTN_DEAL_DROP   = "❌ Отменить сделку"
 BTN_DEAL_CANCEL = "◀️ Отмена"
 
 RESELLER_WELCOME = (
@@ -37,7 +38,8 @@ RESELLER_WELCOME = (
     "• <b>➕ Закуп</b> — пришли ссылку на телефон и цену закупа. "
     "Я сам определю, из бота находка или нет.\n"
     "• <b>✅ Продать</b> — отметь проданное и укажи цену продажи.\n"
-    "• <b>📊 Моя статистика</b> — сводка по всем сделкам."
+    "• <b>📊 Моя статистика</b> — сводка по всем сделкам и байерам.\n"
+    "• <b>❌ Отменить сделку</b> — убрать ошибочный закуп."
 )
 
 
@@ -45,7 +47,7 @@ def reseller_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_DEAL_BUY), KeyboardButton(text=BTN_DEAL_SELL)],
-            [KeyboardButton(text=BTN_DEAL_STATS)],
+            [KeyboardButton(text=BTN_DEAL_STATS), KeyboardButton(text=BTN_DEAL_DROP)],
         ],
         resize_keyboard=True,
         persistent=True,
@@ -63,6 +65,7 @@ def _cancel_menu() -> ReplyKeyboardMarkup:
 class DealFSM(StatesGroup):
     buy_link   = State()
     buy_price  = State()
+    buy_buyer  = State()
     sell_price = State()
 
 
@@ -94,6 +97,11 @@ def _money(n) -> str:
 
 def _short(deal: dict) -> str:
     return deal.get("item_id") or (deal.get("url") or "")[-24:] or f"#{deal['id']}"
+
+
+def _deal_label(deal: dict) -> str:
+    """Читаемая подпись сделки: модель, если есть, иначе item_id/url."""
+    return deal.get("title") or _short(deal)
 
 
 async def _is_operator(user_id: int) -> bool:
@@ -137,18 +145,31 @@ async def _got_buy_price(msg: Message, state: FSMContext):
     if price is None:
         await msg.answer("Не понял цену. Пришли число, например 35000 или 35к.")
         return
+    await state.update_data(buy_price=price)
+    await state.set_state(DealFSM.buy_buyer)
+    await msg.answer(
+        "👤 От кого закуп? Пришли имя байера — или <b>-</b>, чтобы пропустить.",
+        parse_mode="HTML", reply_markup=_cancel_menu(),
+    )
+
+
+async def _got_buyer(msg: Message, state: FSMContext):
+    buyer = (msg.text or "").strip()
+    if buyer in ("-", "—", ""):
+        buyer = ""
     data = await state.get_data()
     url = data.get("url", "")
+    price = data.get("buy_price", 0)
     await state.clear()
-    deal = await db.add_deal(url, price, reseller_id=msg.from_user.id)
+    deal = await db.add_deal(url, price, reseller_id=msg.from_user.id, buyer_hint=buyer)
 
     if deal["attributed"]:
-        title = deal.get("title") or _short(deal)
-        head = f"✅ <b>Через бота</b> — при продаже засчитаю {int(FEE_RATE*100)}%\n<i>{title}</i>"
+        head = f"✅ <b>Через бота</b> — при продаже засчитаю {int(FEE_RATE*100)}%\n<i>{_deal_label(deal)}</i>"
     else:
         head = "➖ <b>Не через бота</b> — 5% не берётся"
+    who = f" · от {buyer}" if buyer else ""
     await msg.answer(
-        f"{head}\n\nСделка <b>#{deal['id']}</b> · закуп {_money(price)}\n"
+        f"{head}\n\nСделка <b>#{deal['id']}</b> · закуп {_money(price)}{who}\n"
         f"Как продашь — жми <b>{BTN_DEAL_SELL}</b>.",
         parse_mode="HTML", reply_markup=reseller_menu(),
     )
@@ -165,7 +186,7 @@ async def _start_sell(msg: Message, state: FSMContext):
     rows = []
     for d in opens[:30]:
         mark = "🤖" if d["attributed"] else "➖"
-        label = f"#{d['id']} {mark} {_money(d['buy_price'])} · {_short(d)}"
+        label = f"#{d['id']} {mark} {_money(d['buy_price'])} · {_deal_label(d)}"
         rows.append([InlineKeyboardButton(text=label[:60], callback_data=f"sell:{d['id']}")])
     await msg.answer(
         "Выбери проданную сделку:",
@@ -217,7 +238,7 @@ async def _got_sell_price(msg: Message, state: FSMContext):
             await msg.bot.send_message(
                 OWNER_ID,
                 f"🟢 <b>Продажа через бота</b> · сделка #{deal_id}\n"
-                f"{sold.get('url') or _short(sold)}\n"
+                f"{_deal_label(sold)}\n"
                 f"Закуп {_money(sold['buy_price'])} → продажа {_money(price)}\n"
                 f"Маржа {_money(margin)} · <b>твои {int(FEE_RATE*100)}%: {_money(fee)}</b>",
                 parse_mode="HTML",
@@ -231,18 +252,52 @@ async def _reseller_stats(msg: Message, state: FSMContext):
     if not await _is_operator(msg.from_user.id):
         return
     r = await db.get_reseller_report(msg.from_user.id)
-    await msg.answer(
-        "📊 <b>Твоя статистика</b>\n\n"
-        f"Открыто: <b>{r.get('open_cnt', 0)}</b>\n"
-        f"Продано: <b>{r.get('sold_cnt', 0)}</b> "
-        f"(из них через бота: <b>{r.get('bot_sold', 0)}</b>)\n"
-        f"Суммарная маржа: <b>{_money(r.get('margin', 0))}</b>\n"
+    lines = [
+        "📊 <b>Твоя статистика</b>\n",
+        f"Открыто: <b>{r.get('open_cnt', 0)}</b>",
+        f"Продано: <b>{r.get('sold_cnt', 0)}</b> (из них через бота: <b>{r.get('bot_sold', 0)}</b>)",
+        f"Суммарная маржа: <b>{_money(r.get('margin', 0))}</b>",
         f"Доля владельца (5%): <b>{_money(r.get('fee', 0))}</b>",
-        parse_mode="HTML", reply_markup=reseller_menu(),
+    ]
+    breakdown = await db.get_buyer_breakdown(msg.from_user.id)
+    if breakdown:
+        lines.append("\n<b>По байерам:</b>")
+        for b in breakdown[:10]:
+            lines.append(f"• {b['buyer']}: {b['cnt']} сделок · маржа {_money(b['margin'])}")
+    await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=reseller_menu())
+
+
+# ── Отмена (удаление) сделки ──────────────────────────────────────────────────
+async def _start_drop(msg: Message, state: FSMContext):
+    if not await _is_operator(msg.from_user.id):
+        return
+    opens = await db.get_open_deals(msg.from_user.id)
+    if not opens:
+        await msg.answer("Открытых сделок нет.", reply_markup=reseller_menu())
+        return
+    rows = []
+    for d in opens[:30]:
+        mark = "🤖" if d["attributed"] else "➖"
+        label = f"#{d['id']} {mark} {_money(d['buy_price'])} · {_deal_label(d)}"
+        rows.append([InlineKeyboardButton(text=label[:60], callback_data=f"dcancel:{d['id']}")])
+    await msg.answer(
+        "Какую сделку удалить?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
 
-# ── Отмена ────────────────────────────────────────────────────────────────────
+async def _cb_drop(cb: CallbackQuery, state: FSMContext):
+    deal_id = int(cb.data.split(":")[1])
+    ok = await db.delete_deal(deal_id, reseller_id=cb.from_user.id)
+    if ok:
+        await cb.message.edit_text(f"🗑 Сделка #{deal_id} удалена.")
+    else:
+        await cb.answer("Не найдена или уже закрыта.", show_alert=True)
+        return
+    await cb.answer()
+
+
+# ── Отмена ввода ──────────────────────────────────────────────────────────────
 async def _cancel(msg: Message, state: FSMContext):
     await state.clear()
     if await db.is_reseller(msg.from_user.id) and msg.from_user.id != OWNER_ID:
@@ -269,10 +324,21 @@ async def _cmd_report(msg: Message):
         lines.append("\n<b>Последние:</b>")
         for d in rep["deals"][:10]:
             lines.append(
-                f"#{d['id']} · {_money(d['buy_price'])}→{_money(d['sell_price'])} "
-                f"· 5% {_money(d['fee'])}"
+                f"#{d['id']} {_deal_label(d)[:22]} · "
+                f"{_money(d['buy_price'])}→{_money(d['sell_price'])} · 5% {_money(d['fee'])}"
             )
     await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+async def _cmd_deal_del(msg: Message):
+    if msg.from_user.id != OWNER_ID:
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await msg.answer("Использование: <code>/deal_del &lt;номер_сделки&gt;</code>", parse_mode="HTML")
+        return
+    ok = await db.delete_deal(int(parts[1]))
+    await msg.answer(f"🗑 Сделка #{parts[1]} удалена." if ok else "Сделка не найдена.")
 
 
 async def _cmd_reseller_add(msg: Message):
@@ -333,17 +399,21 @@ def register_deal_handlers(dp):
     dp.message.register(_start_buy,      F.text == BTN_DEAL_BUY)
     dp.message.register(_start_sell,     F.text == BTN_DEAL_SELL)
     dp.message.register(_reseller_stats, F.text == BTN_DEAL_STATS)
+    dp.message.register(_start_drop,     F.text == BTN_DEAL_DROP)
 
     # Команды владельца
     dp.message.register(_cmd_report,       Command("report"))
+    dp.message.register(_cmd_deal_del,     Command("deal_del"))
     dp.message.register(_cmd_reseller_add, Command("reseller_add"))
     dp.message.register(_cmd_reseller_del, Command("reseller_del"))
     dp.message.register(_cmd_resellers,    Command("resellers"))
 
-    # Выбор сделки для продажи
+    # Инлайн-выбор сделки
     dp.callback_query.register(_cb_pick_sell, F.data.startswith("sell:"))
+    dp.callback_query.register(_cb_drop,      F.data.startswith("dcancel:"))
 
     # State-хэндлеры (после кнопок)
     dp.message.register(_got_link,       DealFSM.buy_link)
     dp.message.register(_got_buy_price,  DealFSM.buy_price)
+    dp.message.register(_got_buyer,      DealFSM.buy_buyer)
     dp.message.register(_got_sell_price, DealFSM.sell_price)

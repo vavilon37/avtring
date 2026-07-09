@@ -139,6 +139,10 @@ async def init_db():
             await db.execute("UPDATE watches SET initialized = 1")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE deals ADD COLUMN title TEXT")
+        except Exception:
+            pass
         await db.commit()
     logger.info("Database initialized")
     await _migrate_slug_urls()
@@ -604,18 +608,19 @@ async def add_deal(url: str, buy_price: int, reseller_id: int,
     item_id = extract_item_id(url)
     sent = await find_sent(item_id) if item_id else None
     attributed = 1 if sent else 0
+    title = (sent or {}).get("title")
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO deals (item_id, url, buy_price, reseller_id, buyer_hint, note, attributed) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (item_id, url, buy_price, reseller_id, buyer_hint, note, attributed),
+            "INSERT INTO deals (item_id, url, buy_price, reseller_id, buyer_hint, note, attributed, title) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (item_id, url, buy_price, reseller_id, buyer_hint, note, attributed, title),
         )
         await db.commit()
         deal_id = cur.lastrowid
     return {
         "id": deal_id, "item_id": item_id, "url": url, "buy_price": buy_price,
-        "attributed": attributed, "sent": sent,
-        "title": (sent or {}).get("title"),
+        "attributed": attributed, "sent": sent, "title": title,
+        "buyer_hint": buyer_hint,
     }
 
 
@@ -685,6 +690,34 @@ async def get_owner_report(days: int | None = None) -> dict:
         ) as cur:
             deals = [dict(r) for r in await cur.fetchall()]
     return {"count": agg["n"], "margin": agg["margin"], "fee": agg["fee"], "deals": deals}
+
+
+async def delete_deal(deal_id: int, reseller_id: int | None = None) -> bool:
+    """Удаляет сделку. Если задан reseller_id — только свою (для реселлера)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if reseller_id is not None:
+            cur = await db.execute(
+                "DELETE FROM deals WHERE id = ? AND reseller_id = ?", (deal_id, reseller_id)
+            )
+        else:
+            cur = await db.execute("DELETE FROM deals WHERE id = ?", (deal_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_buyer_breakdown(reseller_id: int) -> list[dict]:
+    """Разбивка сделок реселлера по байерам: кто сколько принёс."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT COALESCE(NULLIF(TRIM(buyer_hint), ''), '—') AS buyer, "
+            "  COUNT(*) AS cnt, "
+            "  COALESCE(SUM(CASE WHEN status='sold' THEN sell_price - buy_price END), 0) AS margin "
+            "FROM deals WHERE reseller_id = ? "
+            "GROUP BY buyer ORDER BY cnt DESC",
+            (reseller_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def get_reseller_report(reseller_id: int) -> dict:
