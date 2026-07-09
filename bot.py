@@ -407,6 +407,11 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
             await cb.message.answer("📍 <b>Пара свежих объявлений по твоему запросу:</b>", parse_mode="HTML")
             for p in previews:
                 await send_listing(cb.bot, cb.from_user.id, p, f"Превью · {label}")
+                # Превью — тоже «присланное ботом», логируем для атрибуции.
+                try:
+                    await db.log_sent_item(p, cb.from_user.id)
+                except Exception as e:
+                    logger.warning(f"log_sent_item (preview) failed for {p.get('id')}: {e}")
         else:
             await cb.message.answer("ℹ️ Сейчас свежих объявлений нет — как появятся, сразу пришлю.")
 
