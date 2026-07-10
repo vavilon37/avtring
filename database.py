@@ -298,6 +298,8 @@ async def get_user_plan(user_id: int) -> str:
     """Returns 'paid', 'trial', or 'free'"""
     if user_id in OWNER_IDS:
         return "paid"
+    if await is_buyer(user_id):
+        return "paid"  # байеры — быстрый интервал мониторинга, без подписки
     if await is_subscribed(user_id):
         return "paid"
     if await is_trial_active(user_id):
@@ -782,6 +784,12 @@ async def buyer_name(user_id: int) -> str | None:
         async with db.execute("SELECT name FROM buyers WHERE user_id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
             return row[0] if row else None
+
+
+async def is_buyer(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM buyers WHERE user_id = ?", (user_id,)) as cur:
+            return await cur.fetchone() is not None
 
 
 # ── Фото и описание сделки ───────────────────────────────────────────────────

@@ -54,12 +54,12 @@ class AddWatch(StatesGroup):
 # ── Admin-only lock (temporary) ──────────────────────────────────────────────
 
 class AdminOnlyMiddleware(BaseMiddleware):
-    """Временная блокировка: ботом пользуются только владелец и реселлеры."""
+    """Доступ только у владельца, реселлеров и байеров из реестра."""
 
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
         if user is not None and user.id != OWNER_ID:
-            if not await db.is_reseller(user.id):
+            if not (await db.is_reseller(user.id) or await db.is_buyer(user.id)):
                 if isinstance(event, CallbackQuery):
                     await event.answer("🚧 Бот временно недоступен", show_alert=True)
                 elif isinstance(event, Message):
@@ -185,6 +185,8 @@ async def _plan_text(user_id: int) -> str:
 async def _max_watches(user_id: int) -> int:
     if user_id == OWNER_ID:
         return 999
+    if await db.is_buyer(user_id):
+        return 2  # байер — до 2 поисков
     plan = await db.get_user_plan(user_id)
     if plan == "paid":
         return PAID_MAX_WATCHES
@@ -252,15 +254,10 @@ async def _cmd_help(msg: Message):
 
 async def _cmd_add(msg: Message, state: FSMContext):
     await db.ensure_user(msg.from_user.id)
-    plan = await db.get_user_plan(msg.from_user.id)
 
-    if plan == "free":
-        await msg.answer(
-            "🔒 <b>Пробный период закончился</b>\n\n"
-            "Пригласи друга — получи <b>+1 день</b> бесплатно 🔗",
-            parse_mode="HTML",
-            reply_markup=_main_menu(msg.from_user.id),
-        )
+    # Поиски создают только владелец и байеры. Реселлер — только учёт сделок.
+    if msg.from_user.id != OWNER_ID and not await db.is_buyer(msg.from_user.id):
+        await msg.answer("🧾 У тебя только учёт сделок — поиски не создаются.")
         return
 
     watches = await db.get_user_watches(msg.from_user.id)
