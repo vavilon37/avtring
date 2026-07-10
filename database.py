@@ -441,6 +441,22 @@ async def mark_listings_seen(watch_id: int, listing_ids: list[str]):
         await db.commit()
 
 
+async def unmark_listings_seen(watch_id: int, listing_ids: list[str]):
+    """Снимает метку seen — объявление снова станет «новым» на следующем цикле.
+
+    Используется при сбое доставки в Telegram: иначе непришедшая карточка
+    терялась бы навсегда. Ретраи ограничены фильтром возраста (24ч).
+    """
+    if not listing_ids:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            "DELETE FROM seen_listings WHERE watch_id = ? AND listing_id = ?",
+            [(watch_id, lid) for lid in listing_ids],
+        )
+        await db.commit()
+
+
 # ── Роль реселлера ──────────────────────────────────────────────────────────
 
 async def add_reseller(user_id: int):

@@ -1,3 +1,4 @@
+import html
 import logging
 import httpx
 from datetime import datetime, timezone, timedelta
@@ -354,8 +355,11 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
         if previews:
             await cb.message.answer("📍 <b>Пара свежих объявлений по твоему запросу:</b>", parse_mode="HTML")
             for p in previews:
-                fid = await send_listing(cb.bot, cb.from_user.id, p, f"Превью · {label}")
+                ok, fid = await send_listing(cb.bot, cb.from_user.id, p, f"Превью · {label}")
                 # Превью — тоже «присланное ботом», логируем для атрибуции + автофото.
+                # Только реально доставленное: недошедшее в журнал не попадает.
+                if not ok:
+                    continue
                 try:
                     await db.log_sent_item(p, cb.from_user.id, photo_file_id=fid)
                 except Exception as e:
@@ -434,27 +438,33 @@ async def _cb_delete(cb: CallbackQuery):
 
 # ── Listing card ──────────────────────────────────────────────────────────────
 
+def _esc(s) -> str:
+    """Экранирует текст с Авито перед вставкой в HTML parse_mode —
+    иначе '<' в заголовке/описании ломает отправку целиком."""
+    return html.escape(str(s or ""))
+
+
 def _build_listing_text(listing: dict, watch_label: str) -> str:
-    lines = [f"🔔 <b>{watch_label}</b>"]
-    lines.append(f"📱 <b>{listing['title']}</b> — <b>{listing['price']}</b>")
+    lines = [f"🔔 <b>{_esc(watch_label)}</b>"]
+    lines.append(f"📱 <b>{_esc(listing['title'])}</b> — <b>{_esc(listing['price'])}</b>")
 
     params: dict = listing.get("params", {})
     if params:
         lines.append("")
         for k, v in list(params.items())[:10]:
             if v and str(v).strip():
-                lines.append(f"▫️ {k}: <b>{v}</b>")
+                lines.append(f"▫️ {_esc(k)}: <b>{_esc(v)}</b>")
 
     desc = (listing.get("description") or "").strip()
     if desc:
         short = desc[:400] + ("..." if len(desc) > 400 else "")
-        lines.append(f"\n📝 {short}")
+        lines.append(f"\n📝 {_esc(short)}")
 
     lines.append("")
     if listing.get("location"):
-        lines.append(f"📍 {listing['location']}")
+        lines.append(f"📍 {_esc(listing['location'])}")
     if listing.get("date"):
-        lines.append(f"🕐 {listing['date']}")
+        lines.append(f"🕐 {_esc(listing['date'])}")
 
     seller_parts = []
     if listing.get("seller_name"):
@@ -462,9 +472,9 @@ def _build_listing_text(listing: dict, watch_label: str) -> str:
     if listing.get("seller_type"):
         seller_parts.append(listing["seller_type"])
     if seller_parts:
-        lines.append(f"👤 {' · '.join(seller_parts)}")
+        lines.append(f"👤 {_esc(' · '.join(seller_parts))}")
 
-    lines.append(f"\n<a href='{listing['link']}'>🔗 Открыть на Авито</a>")
+    lines.append(f"\n<a href='{_esc(listing['link'])}'>🔗 Открыть на Авито</a>")
     return "\n".join(lines)
 
 
@@ -479,11 +489,17 @@ async def _download_image(url: str) -> bytes | None:
     return None
 
 
-async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str) -> str | None:
-    """Отправляет карточку байеру. Возвращает file_id отправленного фото (или None)."""
+async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str) -> tuple[bool, str | None]:
+    """Отправляет карточку байеру.
+
+    Возвращает (доставлено, file_id отправленного фото или None). По флагу
+    доставки monitor решает: писать в журнал атрибуции или повторить на
+    следующем цикле.
+    """
     text = _build_listing_text(listing, watch_label)
     images = [img for img in listing.get("images", []) if img and img.startswith("http")]
     photo_file_id = None
+    delivered = False
 
     try:
         _no_preview = LinkPreviewOptions(is_disabled=True)
@@ -506,16 +522,21 @@ async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str) 
                 else:
                     await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
                                            link_preview_options=_no_preview)
-            if sent_msg and sent_msg.photo:
-                photo_file_id = sent_msg.photo[-1].file_id
+                    delivered = True
+            if sent_msg:
+                delivered = True
+                if sent_msg.photo:
+                    photo_file_id = sent_msg.photo[-1].file_id
         else:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
                                    link_preview_options=_no_preview)
+            delivered = True
     except Exception as e:
         logger.warning(f"Send failed for {user_id}: {e}")
         try:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
                                    link_preview_options=LinkPreviewOptions(is_disabled=True))
+            delivered = True
         except Exception as e2:
             logger.error(f"Fallback send failed for {user_id}: {e2}")
-    return photo_file_id
+    return delivered, photo_file_id

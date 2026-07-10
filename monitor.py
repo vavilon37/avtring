@@ -409,9 +409,15 @@ class Monitor:
                         # цикле он распознает объявление как новое и пришлёт дубль.
                         await mark_listings_seen(watch["id"], [listing["id"]])
                         continue
-                    user_sent.add(listing["id"])
                     await mark_listings_seen(watch["id"], [listing["id"]])
-                    fid = await send_listing(self.bot, watch["user_id"], listing, label)
+                    ok, fid = await send_listing(self.bot, watch["user_id"], listing, label)
+                    if not ok:
+                        # Доставка сорвалась — снимаем метку, чтобы объявление
+                        # не потерялось и ушло повторно на следующем цикле.
+                        await db.unmark_listings_seen(watch["id"], [listing["id"]])
+                        logger.warning(f"[send-fail] {listing.get('id')} → retry next cycle")
+                        continue
+                    user_sent.add(listing["id"])
                     # Журнал реально присланного байеру — основа атрибуции 5% + автофото.
                     try:
                         await db.log_sent_item(listing, watch["user_id"], watch["id"], photo_file_id=fid)
