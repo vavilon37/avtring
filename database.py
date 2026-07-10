@@ -166,6 +166,10 @@ async def init_db():
                 await db.execute(ddl)
             except Exception:
                 pass
+        try:
+            await db.execute("ALTER TABLE sent_items ADD COLUMN photo_file_id TEXT")
+        except Exception:
+            pass
         # Сид известных участников (id даны владельцем).
         await db.execute("INSERT OR IGNORE INTO resellers (user_id) VALUES (?)", (1295870874,))
         for uid, nm in ((1963364335, "Байер 1"), (1421447029, "Байер 2")):
@@ -598,14 +602,18 @@ async def get_resellers() -> list[int]:
 
 # ── Журнал присланного байерам (основа атрибуции) ───────────────────────────
 
-async def log_sent_item(listing: dict, buyer_id: int, watch_id: int | None = None):
-    """Фиксирует объявление, реально отправленное байеру. Вызывать в точке отправки."""
+async def log_sent_item(listing: dict, buyer_id: int, watch_id: int | None = None,
+                        photo_file_id: str | None = None):
+    """Фиксирует объявление, реально отправленное байеру. Вызывать в точке отправки.
+
+    `photo_file_id` — Telegram file_id уже отправленного фото (для автофото сделки).
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO sent_items (listing_id, buyer_id, watch_id, price, title, link) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sent_items (listing_id, buyer_id, watch_id, price, title, link, photo_file_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (str(listing.get("id")), buyer_id, watch_id,
-             listing.get("price"), listing.get("title"), listing.get("link")),
+             listing.get("price"), listing.get("title"), listing.get("link"), photo_file_id),
         )
         await db.commit()
 
@@ -644,6 +652,9 @@ async def add_deal(url: str, buy_price: int, reseller_id: int,
         )
         await db.commit()
         deal_id = cur.lastrowid
+    # Автофото: если объявление слал бот и есть его фото — цепляем к сделке.
+    if sent and sent.get("photo_file_id"):
+        await add_deal_photo(deal_id, sent["photo_file_id"])
     return {
         "id": deal_id, "item_id": item_id, "url": url, "buy_price": buy_price,
         "attributed": attributed, "sent": sent, "title": title,

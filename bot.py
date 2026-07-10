@@ -406,10 +406,10 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
         if previews:
             await cb.message.answer("📍 <b>Пара свежих объявлений по твоему запросу:</b>", parse_mode="HTML")
             for p in previews:
-                await send_listing(cb.bot, cb.from_user.id, p, f"Превью · {label}")
-                # Превью — тоже «присланное ботом», логируем для атрибуции.
+                fid = await send_listing(cb.bot, cb.from_user.id, p, f"Превью · {label}")
+                # Превью — тоже «присланное ботом», логируем для атрибуции + автофото.
                 try:
-                    await db.log_sent_item(p, cb.from_user.id)
+                    await db.log_sent_item(p, cb.from_user.id, photo_file_id=fid)
                 except Exception as e:
                     logger.warning(f"log_sent_item (preview) failed for {p.get('id')}: {e}")
         else:
@@ -550,25 +550,26 @@ async def _download_image(url: str) -> bytes | None:
     return None
 
 
-async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str):
+async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str) -> str | None:
+    """Отправляет карточку байеру. Возвращает file_id отправленного фото (или None)."""
     text = _build_listing_text(listing, watch_label)
     images = [img for img in listing.get("images", []) if img and img.startswith("http")]
+    photo_file_id = None
 
     try:
         _no_preview = LinkPreviewOptions(is_disabled=True)
         if images:
-            sent = False
+            sent_msg = None
             try:
-                await bot.send_photo(chat_id=user_id, photo=images[0], caption=text, parse_mode="HTML")
-                sent = True
+                sent_msg = await bot.send_photo(chat_id=user_id, photo=images[0], caption=text, parse_mode="HTML")
             except Exception:
-                pass
-            if not sent:
+                sent_msg = None
+            if sent_msg is None:
                 # Avito CDN requires Referer — Telegram doesn't send it; download and re-upload
                 photo_bytes = await _download_image(images[0])
                 if photo_bytes:
                     from aiogram.types import BufferedInputFile
-                    await bot.send_photo(
+                    sent_msg = await bot.send_photo(
                         chat_id=user_id,
                         photo=BufferedInputFile(photo_bytes, filename="photo.jpg"),
                         caption=text, parse_mode="HTML",
@@ -576,6 +577,8 @@ async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str):
                 else:
                     await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
                                            link_preview_options=_no_preview)
+            if sent_msg and sent_msg.photo:
+                photo_file_id = sent_msg.photo[-1].file_id
         else:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
                                    link_preview_options=_no_preview)
@@ -586,3 +589,4 @@ async def send_listing(bot: Bot, user_id: int, listing: dict, watch_label: str):
                                    link_preview_options=LinkPreviewOptions(is_disabled=True))
         except Exception as e2:
             logger.error(f"Fallback send failed for {user_id}: {e2}")
+    return photo_file_id

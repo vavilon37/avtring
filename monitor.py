@@ -437,10 +437,10 @@ class Monitor:
                         continue
                     user_sent.add(listing["id"])
                     await mark_listings_seen(watch["id"], [listing["id"]])
-                    await send_listing(self.bot, watch["user_id"], listing, label)
-                    # Журнал реально присланного байеру — основа атрибуции 5%.
+                    fid = await send_listing(self.bot, watch["user_id"], listing, label)
+                    # Журнал реально присланного байеру — основа атрибуции 5% + автофото.
                     try:
-                        await db.log_sent_item(listing, watch["user_id"], watch["id"])
+                        await db.log_sent_item(listing, watch["user_id"], watch["id"], photo_file_id=fid)
                     except Exception as e:
                         logger.warning(f"log_sent_item failed for {listing.get('id')}: {e}")
                     self._sent_today += 1

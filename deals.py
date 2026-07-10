@@ -10,6 +10,7 @@
 
 Подключается из main.py: register_deal_handlers(dp).
 """
+import html
 import logging
 import re
 
@@ -112,6 +113,10 @@ def _short(deal: dict) -> str:
 
 def _deal_label(deal: dict) -> str:
     return deal.get("title") or _short(deal)
+
+
+def _esc(s) -> str:
+    return html.escape(str(s or ""))
 
 
 async def _is_operator(user_id: int) -> bool:
@@ -337,13 +342,13 @@ async def _cb_card(cb: CallbackQuery, state: FSMContext):
         return
     photos = await db.get_deal_photos(deal_id)
     src = "🤖 через бота" if d["attributed"] else "➖ сам"
-    txt = f"<b>Сделка #{d['id']}</b> · {src}\n{_deal_label(d)}\nЗакуп: {_money(d['buy_price'])}"
+    txt = f"<b>Сделка #{d['id']}</b> · {src}\n{_esc(_deal_label(d))}\nЗакуп: {_money(d['buy_price'])}"
     if d["status"] == "sold":
         txt += f" → продажа {_money(d['sell_price'])} · 5% {_money(d.get('fee') or 0)}"
     if d.get("buyer_hint"):
-        txt += f"\nОт кого: {d['buyer_hint']}"
+        txt += f"\nОт кого: {_esc(d['buyer_hint'])}"
     if d.get("note"):
-        txt += f"\n📝 {d['note']}"
+        txt += f"\n📝 {_esc(d['note'])}"
     if photos:
         txt += f"\n📷 фото: {len(photos)}"
 
@@ -470,10 +475,23 @@ async def _reseller_stats(msg: Message, state: FSMContext):
     r = await db.get_reseller_report(msg.from_user.id)
     out = await db.get_outstanding_fee(msg.from_user.id)
     tot = await db.get_total_fee(msg.from_user.id)
-    lines = [
-        "📊 <b>Твоя статистика</b>\n",
-        f"Открыто: <b>{r.get('open_cnt', 0)}</b>",
-        f"Продано: <b>{r.get('sold_cnt', 0)}</b> (из них через бота: <b>{r.get('bot_sold', 0)}</b>)",
+    opens = await db.get_open_deals(msg.from_user.id)
+
+    lines = ["📊 <b>Твоя статистика</b>\n", f"<b>Открытые сделки: {len(opens)}</b>"]
+    for d in opens[:20]:
+        mark = "🤖" if d["attributed"] else "➖"
+        row = f"#{d['id']} {mark} {_esc(_deal_label(d))} · закуп {_money(d['buy_price'])}"
+        if d.get("buyer_hint"):
+            row += f" · от {_esc(d['buyer_hint'])}"
+        lines.append(row)
+        if d.get("note"):
+            note = _esc(d["note"].replace("\n", " "))
+            lines.append(f"   📝 {note[:140]}")
+    if len(opens) > 20:
+        lines.append(f"…и ещё {len(opens) - 20}")
+
+    lines += [
+        f"\nПродано: <b>{r.get('sold_cnt', 0)}</b> (из них через бота: <b>{r.get('bot_sold', 0)}</b>)",
         f"Суммарная маржа: <b>{_money(r.get('margin', 0))}</b>",
         f"\n💰 Долг владельцу сейчас: <b>{_money(out)}</b>",
         f"Всего начислено 5%: <b>{_money(tot)}</b>",
@@ -482,7 +500,7 @@ async def _reseller_stats(msg: Message, state: FSMContext):
     if breakdown:
         lines.append("\n<b>По байерам:</b>")
         for b in breakdown[:10]:
-            lines.append(f"• {b['buyer']}: {b['cnt']} сделок · маржа {_money(b['margin'])}")
+            lines.append(f"• {_esc(b['buyer'])}: {b['cnt']} сделок · маржа {_money(b['margin'])}")
     await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=reseller_menu())
 
 
