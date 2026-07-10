@@ -15,7 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import database as db
-from database import FREE_MAX_WATCHES, TRIAL_MAX_WATCHES, PAID_MAX_WATCHES, OWNER_ID, OWNER_IDS, TRIAL_DAYS
+from database import OWNER_ID, OWNER_IDS
 from database import pause_user, resume_user, is_user_paused
 from filters import (
     PHONE_MODELS, CONDITIONS, SELLER_TYPES, CITIES, STORAGE_OPTIONS,
@@ -35,7 +35,6 @@ def set_monitor(monitor) -> None:
 BTN_ADD  = "➕ Добавить поиск"
 BTN_LIST = "📋 Мои поиски"
 BTN_STOP = "🗑 Удалить поиск"
-BTN_REF  = "🔗 Пригласить друга"
 BTN_HELP = "❓ Помощь"
 
 
@@ -88,14 +87,12 @@ def _register_handlers(dp: Dispatcher):
     dp.message.register(_cmd_add,   Command("add"))
     dp.message.register(_cmd_list,  Command("list"))
     dp.message.register(_cmd_stop,  Command("stop"))
-    dp.message.register(_cmd_ref,   Command("ref"))
     dp.message.register(_cmd_pause,  Command("pause"))
     dp.message.register(_cmd_resume, Command("resume"))
 
     dp.message.register(_cmd_add,  F.text == BTN_ADD)
     dp.message.register(_cmd_list, F.text == BTN_LIST)
     dp.message.register(_cmd_stop, F.text == BTN_STOP)
-    dp.message.register(_cmd_ref,  F.text == BTN_REF)
     dp.message.register(_cmd_help, F.text == BTN_HELP)
 
     # FSM
@@ -115,8 +112,7 @@ def _register_handlers(dp: Dispatcher):
 def _main_menu(user_id: int) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text=BTN_ADD),  KeyboardButton(text=BTN_LIST)],
-        [KeyboardButton(text=BTN_STOP), KeyboardButton(text=BTN_REF)],
-        [KeyboardButton(text=BTN_HELP)],
+        [KeyboardButton(text=BTN_STOP), KeyboardButton(text=BTN_HELP)],
     ]
     if user_id == OWNER_ID:
         keyboard.append([KeyboardButton(text=BTN_ADMIN)])
@@ -166,39 +162,18 @@ def _kb_cities() -> InlineKeyboardMarkup:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _plan_text(user_id: int) -> str:
-    plan = await db.get_user_plan(user_id)
-    if plan == "paid":
-        user = await db.get_user(user_id)
-        expires = user["sub_expires_at"][:10] if user["sub_expires_at"] else "∞"
-        return f"💎 <b>Подписка активна</b> до {expires}"
-    if plan == "trial":
-        user = await db.get_user(user_id)
-        started = datetime.fromisoformat(user["trial_started_at"]).replace(tzinfo=timezone.utc)
-        bonus = user["trial_bonus_days"] if user["trial_bonus_days"] else 0
-        trial_end = started + timedelta(days=TRIAL_DAYS + bonus)
-        hours_left = max(0, int((trial_end - datetime.now(timezone.utc)).total_seconds() / 3600))
-        return f"🎁 <b>Пробный период</b> — осталось ~{hours_left}ч"
-    return "🔒 <b>Нет подписки</b>"
-
-
 async def _max_watches(user_id: int) -> int:
     if user_id == OWNER_ID:
         return 999
     if await db.is_buyer(user_id):
         return 2  # байер — до 2 поисков
-    plan = await db.get_user_plan(user_id)
-    if plan == "paid":
-        return PAID_MAX_WATCHES
-    if plan == "trial":
-        return TRIAL_MAX_WATCHES
-    return FREE_MAX_WATCHES
+    return 0
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 async def _cmd_start(msg: Message):
-    is_new = await db.ensure_user(msg.from_user.id)
+    await db.ensure_user(msg.from_user.id)
 
     # Реселлер (не владелец) видит своё меню учёта сделок, а не байерский экран.
     if msg.from_user.id != OWNER_ID and await db.is_reseller(msg.from_user.id):
@@ -206,32 +181,11 @@ async def _cmd_start(msg: Message):
         await msg.answer(RESELLER_WELCOME, parse_mode="HTML", reply_markup=reseller_menu())
         return
 
-    # Parse referral payload: /start ref1234567890
-    referrer_id = None
-    text = msg.text or ""
-    if " " in text:
-        payload = text.split(" ", 1)[1]
-        if payload.startswith("ref") and payload[3:].isdigit():
-            referrer_id = int(payload[3:])
-
-    if is_new and referrer_id:
-        applied = await db.apply_referral(msg.from_user.id, referrer_id)
-        if applied:
-            try:
-                await msg.bot.send_message(
-                    referrer_id,
-                    "🎉 <b>По твоей ссылке зарегистрировался новый пользователь!</b>\n"
-                    "+1 день пробного периода добавлен.",
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
-
     welcome = (
-        "📱 <b>Avito Ringer</b>\n\n"
-        "Слежу за новыми объявлениями о продаже телефонов на Авито "
-        "и сразу присылаю карточку с фото и всеми характеристиками.\n\n"
-        f"🎁 <b>{TRIAL_DAYS} день бесплатно</b> — можешь попробовать прямо сейчас!"
+        "📱 <b>Мониторинг Авито</b>\n\n"
+        "Слежу за новыми объявлениями о продаже телефонов и сразу присылаю "
+        "карточку с фото и характеристиками.\n\n"
+        "Нажми <b>➕ Добавить поиск</b>, чтобы начать."
     )
     await msg.answer(welcome, parse_mode="HTML", reply_markup=_main_menu(msg.from_user.id))
 
@@ -382,9 +336,6 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
     storage_gb = data.get("storage_gb", 0)
     await db.add_watch(cb.from_user.id, url, label, storage_gb)
 
-    plan = await db.get_user_plan(cb.from_user.id)
-    interval_note = "каждые 30 секунд" if plan in ("paid", "trial") else "раз в 5 минут"
-
     try:
         await cb.message.edit_reply_markup()
     except Exception:
@@ -392,7 +343,7 @@ async def _cb_city(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer(
         f"✅ <b>Поиск создан!</b>\n\n"
         f"🔍 {label}\n\n"
-        f"Мониторю Авито {interval_note}. Как появится новое объявление — сразу пришлю.",
+        f"Мониторю Авито. Как появится новое объявление — сразу пришлю.",
         parse_mode="HTML",
         reply_markup=_main_menu(cb.from_user.id),
     )
@@ -440,36 +391,17 @@ async def _cmd_resume(msg: Message):
     )
 
 
-async def _cmd_ref(msg: Message):
-    await db.ensure_user(msg.from_user.id)
-    me = await msg.bot.get_me()
-    link = f"https://t.me/{me.username}?start=ref{msg.from_user.id}"
-    count = await db.get_referral_count(msg.from_user.id)
-    await msg.answer(
-        "🔗 <b>Пригласи друга — получи +1 день</b>\n\n"
-        f"За каждого друга, который зайдёт по твоей ссылке, "
-        f"тебе начисляется <b>+1 день</b> подписки.\n"
-        f"Другу — стандартный пробный день.\n\n"
-        f"Твоя ссылка:\n<code>{link}</code>\n\n"
-        f"Приглашено друзей: <b>{count}</b>",
-        parse_mode="HTML",
-        reply_markup=_main_menu(msg.from_user.id),
-    )
-
-
 # ── List & Stop ───────────────────────────────────────────────────────────────
 
 async def _cmd_list(msg: Message):
     watches = await db.get_user_watches(msg.from_user.id)
-    plan_str = await _plan_text(msg.from_user.id)
     if not watches:
         await msg.answer(
-            f"{plan_str}\n\nУ тебя пока нет поисков. Нажми ➕ Добавить поиск.",
-            parse_mode="HTML",
+            "У тебя пока нет поисков. Нажми ➕ Добавить поиск.",
             reply_markup=_main_menu(msg.from_user.id),
         )
         return
-    text = f"{plan_str}\n\n📋 <b>Твои поиски:</b>\n\n"
+    text = "📋 <b>Твои поиски:</b>\n\n"
     for w in watches:
         name = w["label"] or f"Поиск #{w['id']}"
         text += f"<b>#{w['id']}</b> {name}\n"

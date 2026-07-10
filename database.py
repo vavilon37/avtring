@@ -7,13 +7,8 @@ from datetime import datetime, timezone, timedelta
 logger = logging.getLogger(__name__)
 DB_PATH = "avito_ringer.db"
 
-FREE_MAX_WATCHES = 1
-TRIAL_MAX_WATCHES = 1
-PAID_MAX_WATCHES = 3
-TRIAL_DAYS = 1
-FREE_INTERVAL = 300   # 5 минут
-PAID_INTERVAL = 15    # 15 секунд
-SUBSCRIPTION_DAYS = 5
+FREE_INTERVAL = 300   # 5 минут — интервал мониторинга для не-байеров
+PAID_INTERVAL = 15    # 15 секунд — интервал для байеров/владельца
 
 OWNER_ID = 8501271486  # @yodealer
 OWNER_IDS = {OWNER_ID}
@@ -63,13 +58,6 @@ async def init_db():
                 user_id INTEGER PRIMARY KEY,
                 trial_started_at TIMESTAMP,
                 sub_expires_at TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS invoices (
-                invoice_id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         # --- Учёт находок и атрибуция (перепродажа телефонов) ---
@@ -270,79 +258,11 @@ async def get_user(user_id: int) -> dict | None:
             return dict(row) if row else None
 
 
-async def is_subscribed(user_id: int) -> bool:
-    user = await get_user(user_id)
-    if not user:
-        return False
-    if user["sub_expires_at"]:
-        expires = datetime.fromisoformat(user["sub_expires_at"])
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        return expires > datetime.now(timezone.utc)
-    return False
-
-
-async def is_trial_active(user_id: int) -> bool:
-    user = await get_user(user_id)
-    if not user or not user["trial_started_at"]:
-        return False
-    started = datetime.fromisoformat(user["trial_started_at"])
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
-    bonus = user["trial_bonus_days"] if user["trial_bonus_days"] else 0
-    delta = datetime.now(timezone.utc) - started
-    return delta.days < (TRIAL_DAYS + bonus)
-
-
 async def get_user_plan(user_id: int) -> str:
-    """Returns 'paid', 'trial', or 'free'"""
-    if user_id in OWNER_IDS:
+    """'paid' для владельца и байеров (быстрый интервал мониторинга), иначе 'free'."""
+    if user_id in OWNER_IDS or await is_buyer(user_id):
         return "paid"
-    if await is_buyer(user_id):
-        return "paid"  # байеры — быстрый интервал мониторинга, без подписки
-    if await is_subscribed(user_id):
-        return "paid"
-    if await is_trial_active(user_id):
-        return "trial"
     return "free"
-
-
-async def activate_subscription(user_id: int, days: int = SUBSCRIPTION_DAYS):
-    now = datetime.now(timezone.utc)
-    user = await get_user(user_id)
-    if user and user["sub_expires_at"]:
-        current = datetime.fromisoformat(user["sub_expires_at"])
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        expires = (current if current > now else now) + timedelta(days=days)
-    else:
-        expires = now + timedelta(days=days)
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET sub_expires_at = ? WHERE user_id = ?",
-            (expires.isoformat(), user_id),
-        )
-        await db.commit()
-    return expires
-
-
-async def save_invoice(invoice_id: str, user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO invoices (invoice_id, user_id) VALUES (?, ?)",
-            (invoice_id, user_id),
-        )
-        await db.commit()
-
-
-async def get_invoice_user(invoice_id: str) -> int | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT user_id FROM invoices WHERE invoice_id = ?", (invoice_id,)
-        ) as cur:
-            row = await cur.fetchone()
-            return row[0] if row else None
 
 
 async def add_watch(user_id: int, url: str, label: str = "", storage_gb: int = 0) -> int:
@@ -405,14 +325,9 @@ async def get_all_watches() -> list[dict]:
 
 
 async def get_stats() -> dict:
-    now_iso = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COUNT(*) FROM users") as cur:
             total_users = (await cur.fetchone())[0]
-        async with db.execute(
-            "SELECT COUNT(*) FROM users WHERE sub_expires_at > ?", (now_iso,)
-        ) as cur:
-            paid_users = (await cur.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM watches") as cur:
             active_watches = (await cur.fetchone())[0]
         async with db.execute(
@@ -421,7 +336,6 @@ async def get_stats() -> dict:
             seen_today = (await cur.fetchone())[0]
     return {
         "total_users": total_users,
-        "paid_users": paid_users,
         "active_watches": active_watches,
         "seen_today": seen_today,
     }
@@ -481,63 +395,15 @@ async def is_user_paused(user_id: int) -> bool:
             return bool(row and row[0])
 
 
-async def get_expiring_soon(hours: int = 24) -> list[dict]:
-    now_iso = datetime.now(timezone.utc).isoformat()
-    cutoff = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT user_id, sub_expires_at FROM users "
-            "WHERE sub_expires_at > ? AND sub_expires_at <= ?",
-            (now_iso, cutoff),
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
-
-
 async def get_all_users() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT u.user_id, u.sub_expires_at, u.trial_started_at, "
-            "u.trial_bonus_days, u.is_paused, COUNT(w.id) as watch_count "
+            "SELECT u.user_id, u.is_paused, COUNT(w.id) as watch_count "
             "FROM users u LEFT JOIN watches w ON u.user_id = w.user_id "
             "GROUP BY u.user_id ORDER BY u.user_id DESC"
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
-
-
-async def apply_referral(new_user_id: int, referrer_id: int) -> bool:
-    """
-    Links new_user to referrer and gives referrer +1 trial day (1 watch limit).
-    Returns True if referral was applied (only once per new user).
-    """
-    if new_user_id == referrer_id:
-        return False
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT referred_by FROM users WHERE user_id = ?", (new_user_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if not row or row[0] is not None:
-            return False  # user doesn't exist or was already referred
-        await db.execute(
-            "UPDATE users SET referred_by = ? WHERE user_id = ?",
-            (referrer_id, new_user_id),
-        )
-        await db.execute(
-            "UPDATE users SET trial_bonus_days = COALESCE(trial_bonus_days, 0) + 1 WHERE user_id = ?",
-            (referrer_id,),
-        )
-        await db.commit()
-    return True
-
-
-async def get_referral_count(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,)
-        ) as cur:
-            return (await cur.fetchone())[0]
 
 
 async def filter_new_listings(watch_id: int, listings: list[dict], mark: bool = True) -> list[dict]:

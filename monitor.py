@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 import database as db
-from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID, SUBSCRIPTION_DAYS, mark_listings_seen
+from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID, mark_listings_seen
 from parser import AvitoParser, BLOCK_COOLDOWNS
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime, storage_matches
@@ -40,8 +40,6 @@ class Monitor:
         self._url_last_checked: dict[str, float] = {}  # url -> last check timestamp
         self._consecutive_failures: int = 0
         self._last_break: float = 0.0
-        self._last_expiry_check: float = 0.0
-        self._expiry_notified: set[int] = set()
 
     @property
     def _delay_mult(self) -> float:
@@ -50,26 +48,6 @@ class Monitor:
         if self._blocks_today >= 2:
             return 1.5
         return 1.0
-
-    async def _check_expiring_subscriptions(self):
-        expiring = await db.get_expiring_soon(hours=24)
-        for user in expiring:
-            uid = user["user_id"]
-            if uid in self._expiry_notified:
-                continue
-            self._expiry_notified.add(uid)
-            try:
-                await self.bot.send_message(
-                    chat_id=uid,
-                    text=(
-                        "⏰ <b>Подписка заканчивается завтра</b>\n\n"
-                        f"Продли чтобы не прерывать мониторинг — "
-                        f"нажми 💎 Подписка в меню."
-                    ),
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
 
     async def _notify_recovered(self):
         try:
@@ -127,8 +105,7 @@ class Monitor:
             m, s = divmod(rem, 60)
             await msg.answer(
                 "📊 <b>Статистика</b>\n\n"
-                f"👥 Пользователей: <b>{stats['total_users']}</b> "
-                f"(с подпиской: <b>{stats['paid_users']}</b>)\n"
+                f"👥 Пользователей: <b>{stats['total_users']}</b>\n"
                 f"🔍 Активных поисков: <b>{stats['active_watches']}</b>\n"
                 f"📨 Отправлено сегодня: <b>{monitor._sent_today}</b>\n"
                 f"🔎 Найдено сегодня (включая фильтр): <b>{stats['seen_today']}</b>\n"
@@ -205,12 +182,9 @@ class Monitor:
                 self._stats_date = today
                 self._blocks_today = 0
                 self._sent_today = 0
-                self._expiry_notified.clear()
 
             if self._last_break == 0:
                 self._last_break = real_now
-
-            # Уведомления о продлении отключены — покупка подписки убрана.
 
             if self._paused:
                 await asyncio.sleep(5)
@@ -273,7 +247,7 @@ class Monitor:
             if await db.is_user_paused(watch["user_id"]):
                 continue
             plan = await db.get_user_plan(watch["user_id"])
-            if plan in ("paid", "trial"):
+            if plan == "paid":
                 paid_watches.append(watch)
             else:
                 free_watches.append(watch)

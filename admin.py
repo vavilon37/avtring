@@ -17,7 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 import database as db
-from database import OWNER_IDS, TRIAL_DAYS, SUBSCRIPTION_DAYS
+from database import OWNER_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -57,28 +57,9 @@ def set_monitor(monitor) -> None:
 
 class AdminState(StatesGroup):
     broadcast = State()
-    give = State()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _compute_plan(user: dict) -> str:
-    now = datetime.now(timezone.utc)
-    if user.get("sub_expires_at"):
-        exp = datetime.fromisoformat(user["sub_expires_at"])
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=timezone.utc)
-        if exp > now:
-            return "paid"
-    if user.get("trial_started_at"):
-        started = datetime.fromisoformat(user["trial_started_at"])
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=timezone.utc)
-        bonus = user.get("trial_bonus_days") or 0
-        if (now - started).days < (TRIAL_DAYS + bonus):
-            return "trial"
-    return "free"
-
 
 async def _stats_text() -> str:
     stats = await db.get_stats()
@@ -97,7 +78,7 @@ async def _stats_text() -> str:
         parser_status = "❌ остановлен"
     return (
         "🔧 <b>Панель администратора</b>\n\n"
-        f"👥 Пользователей: <b>{stats['total_users']}</b>  (платных: <b>{stats['paid_users']}</b>)\n"
+        f"👥 Пользователей: <b>{stats['total_users']}</b>\n"
         f"🔍 Активных поисков: <b>{stats['active_watches']}</b>\n"
         f"📨 Отправлено сегодня: <b>{sent}</b>\n"
         f"🔎 Найдено сегодня: <b>{stats['seen_today']}</b>\n"
@@ -121,7 +102,6 @@ def _admin_kb() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="📢 Рассылка", callback_data="adm:broadcast"),
-            InlineKeyboardButton(text="🎁 Выдать дни", callback_data="adm:give"),
         ],
         [
             InlineKeyboardButton(text="📋 Все поиски", callback_data="adm:allwatches:0"),
@@ -171,14 +151,22 @@ async def _cb_users(cb: CallbackQuery):
     page = max(0, min(page, total_pages - 1))
     chunk = users[page * per_page: (page + 1) * per_page]
 
-    plan_icon = {"paid": "💎", "trial": "🎁", "free": "🔒"}
+    resellers = set(await db.get_resellers())
+    buyers = {b["user_id"] for b in await db.get_buyers()}
     lines = [f"👥 <b>Пользователи ({len(users)})</b>  стр. {page + 1}/{total_pages}\n"]
     for u in chunk:
-        plan = _compute_plan(u)
-        icon = plan_icon.get(plan, "?")
+        uid = u["user_id"]
+        if uid in OWNER_IDS:
+            role = "👑"
+        elif uid in resellers:
+            role = "🧾"
+        elif uid in buyers:
+            role = "🛒"
+        else:
+            role = "·"
         paused = " ⏸" if u.get("is_paused") else ""
         watches = u.get("watch_count", 0)
-        lines.append(f"{icon}{paused} <code>{u['user_id']}</code> — {watches} пос.")
+        lines.append(f"{role}{paused} <code>{uid}</code> — {watches} пос.")
 
     nav = []
     if page > 0:
@@ -241,50 +229,6 @@ async def _handle_broadcast(msg: Message, state: FSMContext):
         await status.edit_text(f"✅ Доставлено: {ok}\n❌ Не доставлено: {fail}")
     except Exception:
         await msg.answer(f"✅ Доставлено: {ok}\n❌ Не доставлено: {fail}")
-
-
-async def _cb_give(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id not in OWNER_IDS:
-        return await cb.answer()
-    await state.set_state(AdminState.give)
-    try:
-        await cb.message.edit_reply_markup()
-    except Exception:
-        pass
-    await cb.message.answer(
-        "🎁 <b>Выдать подписку</b>\n\n"
-        "Введи <code>user_id количество_дней</code>\n"
-        "Пример: <code>123456789 7</code>\n\n/cancel — отмена",
-        parse_mode="HTML",
-    )
-    await cb.answer()
-
-
-async def _handle_give(msg: Message, state: FSMContext):
-    if msg.from_user.id not in OWNER_IDS:
-        return
-    if msg.text and msg.text.strip() == "/cancel":
-        await state.clear()
-        await msg.answer("Отменено.")
-        return
-    parts = (msg.text or "").strip().split()
-    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-        await msg.answer("❌ Формат: <code>user_id дни</code>", parse_mode="HTML")
-        return
-    user_id, days = int(parts[0]), int(parts[1])
-    await state.clear()
-    await db.ensure_user(user_id)
-    expires = await db.activate_subscription(user_id, days)
-    expires_str = expires.strftime("%d.%m.%Y")
-    try:
-        await msg.bot.send_message(
-            chat_id=user_id,
-            text=f"🎁 <b>Тебе выдана подписка на {days} дней!</b>\nДействует до {expires_str}.",
-            parse_mode="HTML",
-        )
-    except Exception:
-        pass
-    await msg.answer(f"✅ Пользователю <code>{user_id}</code> выдано {days} дней. Истекает {expires_str}.", parse_mode="HTML")
 
 
 async def _cb_restart(cb: CallbackQuery):
@@ -492,7 +436,6 @@ def register_admin_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_stats,     F.data == "adm:stats")
     dp.callback_query.register(_cb_users,     F.data.startswith("adm:users:"))
     dp.callback_query.register(_cb_broadcast, F.data == "adm:broadcast")
-    dp.callback_query.register(_cb_give,      F.data == "adm:give")
     dp.callback_query.register(_cb_restart,  F.data == "adm:restart")
     dp.callback_query.register(_cb_gitpull, F.data == "adm:gitpull")
     dp.callback_query.register(_cb_parser_toggle,  F.data == "adm:parser")
@@ -504,4 +447,3 @@ def register_admin_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_allwatches, F.data.startswith("adm:allwatches:"))
     dp.callback_query.register(_cb_delwatch,   F.data.startswith("adm:delwatch:"))
     dp.message.register(_handle_broadcast, AdminState.broadcast)
-    dp.message.register(_handle_give,      AdminState.give)
