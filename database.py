@@ -108,8 +108,25 @@ async def init_db():
                 sold_at TIMESTAMP
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS buyers (
+                user_id INTEGER PRIMARY KEY,
+                name TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS deal_photos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deal_id INTEGER NOT NULL,
+                file_id TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_seen_watch ON seen_listings(watch_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dealphotos ON deal_photos(deal_id)"
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sent_listing ON sent_items(listing_id)"
@@ -139,10 +156,20 @@ async def init_db():
             await db.execute("UPDATE watches SET initialized = 1")
         except Exception:
             pass
-        try:
-            await db.execute("ALTER TABLE deals ADD COLUMN title TEXT")
-        except Exception:
-            pass
+        for ddl in (
+            "ALTER TABLE deals ADD COLUMN title TEXT",
+            "ALTER TABLE deals ADD COLUMN settled INTEGER DEFAULT 0",
+            "ALTER TABLE deals ADD COLUMN settled_at TIMESTAMP",
+            "ALTER TABLE deals ADD COLUMN buyer_id INTEGER",
+        ):
+            try:
+                await db.execute(ddl)
+            except Exception:
+                pass
+        # Сид известных участников (id даны владельцем).
+        await db.execute("INSERT OR IGNORE INTO resellers (user_id) VALUES (?)", (1295870874,))
+        for uid, nm in ((1963364335, "Байер 1"), (1421447029, "Байер 2")):
+            await db.execute("INSERT OR IGNORE INTO buyers (user_id, name) VALUES (?, ?)", (uid, nm))
         await db.commit()
     logger.info("Database initialized")
     await _migrate_slug_urls()
@@ -603,7 +630,7 @@ async def find_sent(item_id: str) -> dict | None:
 # ── Сделки (закуп → продажа → 5%) ───────────────────────────────────────────
 
 async def add_deal(url: str, buy_price: int, reseller_id: int,
-                   buyer_hint: str = "", note: str = "") -> dict:
+                   buyer_hint: str = "", buyer_id: int | None = None, note: str = "") -> dict:
     """Заводит закуп. Атрибуция считается автоматически по журналу присланного."""
     item_id = extract_item_id(url)
     sent = await find_sent(item_id) if item_id else None
@@ -611,16 +638,16 @@ async def add_deal(url: str, buy_price: int, reseller_id: int,
     title = (sent or {}).get("title")
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO deals (item_id, url, buy_price, reseller_id, buyer_hint, note, attributed, title) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (item_id, url, buy_price, reseller_id, buyer_hint, note, attributed, title),
+            "INSERT INTO deals (item_id, url, buy_price, reseller_id, buyer_hint, buyer_id, note, attributed, title) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (item_id, url, buy_price, reseller_id, buyer_hint, buyer_id, note, attributed, title),
         )
         await db.commit()
         deal_id = cur.lastrowid
     return {
         "id": deal_id, "item_id": item_id, "url": url, "buy_price": buy_price,
         "attributed": attributed, "sent": sent, "title": title,
-        "buyer_hint": buyer_hint,
+        "buyer_hint": buyer_hint, "buyer_id": buyer_id,
     }
 
 
@@ -718,6 +745,106 @@ async def get_buyer_breakdown(reseller_id: int) -> list[dict]:
             (reseller_id,),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+# ── Реестр байеров ───────────────────────────────────────────────────────────
+
+async def add_buyer(user_id: int, name: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO buyers (user_id, name) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET name = excluded.name",
+            (user_id, name),
+        )
+        await db.commit()
+
+
+async def get_buyers() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT user_id, name FROM buyers ORDER BY name") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def buyer_name(user_id: int) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT name FROM buyers WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+
+# ── Фото и описание сделки ───────────────────────────────────────────────────
+
+async def add_deal_photo(deal_id: int, file_id: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO deal_photos (deal_id, file_id) VALUES (?, ?)", (deal_id, file_id)
+        )
+        await db.commit()
+
+
+async def get_deal_photos(deal_id: int) -> list[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT file_id FROM deal_photos WHERE deal_id = ? ORDER BY id", (deal_id,)
+        ) as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+async def set_deal_note(deal_id: int, note: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE deals SET note = ? WHERE id = ?", (note, deal_id))
+        await db.commit()
+
+
+# ── Расчёты по долгу 5% ──────────────────────────────────────────────────────
+
+def _fee_where(reseller_id, settled_only_unpaid):
+    where = "attributed = 1 AND status = 'sold' AND fee > 0"
+    args = []
+    if settled_only_unpaid:
+        where += " AND settled = 0"
+    if reseller_id is not None:
+        where += " AND reseller_id = ?"
+        args.append(reseller_id)
+    return where, args
+
+
+async def get_outstanding_fee(reseller_id: int | None = None) -> int:
+    """Непогашенный долг по 5% (ещё не подтверждён владельцем как оплаченный)."""
+    where, args = _fee_where(reseller_id, settled_only_unpaid=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(f"SELECT COALESCE(SUM(fee), 0) FROM deals WHERE {where}", args) as cur:
+            return (await cur.fetchone())[0]
+
+
+async def get_total_fee(reseller_id: int | None = None) -> int:
+    """Всего начислено 5% за всё время (независимо от оплаты)."""
+    where, args = _fee_where(reseller_id, settled_only_unpaid=False)
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(f"SELECT COALESCE(SUM(fee), 0) FROM deals WHERE {where}", args) as cur:
+            return (await cur.fetchone())[0]
+
+
+async def settle_debt(reseller_id: int) -> int:
+    """Помечает текущий долг реселлера оплаченным. Возвращает погашенную сумму.
+
+    Сделки не удаляются — общая статистика (get_total_fee) сохраняется.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(fee), 0) FROM deals "
+            "WHERE attributed = 1 AND status = 'sold' AND fee > 0 AND settled = 0 AND reseller_id = ?",
+            (reseller_id,),
+        ) as cur:
+            amount = (await cur.fetchone())[0]
+        await db.execute(
+            "UPDATE deals SET settled = 1, settled_at = ? "
+            "WHERE attributed = 1 AND status = 'sold' AND settled = 0 AND reseller_id = ?",
+            (datetime.now(timezone.utc).isoformat(), reseller_id),
+        )
+        await db.commit()
+    return amount
 
 
 async def get_reseller_report(reseller_id: int) -> dict:
