@@ -160,7 +160,7 @@ async def init_db():
             pass
         # Сид известных участников (id даны владельцем).
         await db.execute("INSERT OR IGNORE INTO resellers (user_id) VALUES (?)", (1295870874,))
-        for uid, nm in ((1963364335, "Байер 1"), (1421447029, "Байер 2")):
+        for uid, nm in ((1963364335, "Макар"), (6833886572, "Иван")):
             await db.execute("INSERT OR IGNORE INTO buyers (user_id, name) VALUES (?, ?)", (uid, nm))
         await db.commit()
     logger.info("Database initialized")
