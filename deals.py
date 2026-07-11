@@ -41,9 +41,10 @@ BTN_DONE        = "✅ Готово"
 
 RESELLER_WELCOME = (
     "🧾 <b>Учёт сделок</b>\n\n"
-    "• <b>➕ Закуп</b> — ссылка → цена → байер → описание/фото. "
+    "• <b>➕ Закуп</b> — ссылка → цена → описание/фото. "
     "Бот сам определит, из бота находка или нет.\n"
-    "• <b>✅ Продать</b> — отметь проданное и цену.\n"
+    "• <b>✅ Продать</b> — цена → байер → этапы (нашёл/поехал/продал). "
+    "Бот сам посчитает доли байера, друга и твои 5%.\n"
     "• <b>📂 Сделки</b> — карточки открытых сделок (фото, описание, действия).\n"
     "• <b>📊 Моя статистика</b> — сводка, разбивка по байерам, долг по 5%.\n"
     "• <b>💰 Закрыть долг</b> — запросить у владельца подтверждение оплаты 5%.\n"
@@ -73,12 +74,12 @@ def _done_menu() -> ReplyKeyboardMarkup:
 
 # ── FSM ──────────────────────────────────────────────────────────────────────
 class DealFSM(StatesGroup):
-    buy_link       = State()
-    buy_price      = State()
-    buy_buyer      = State()   # ждём выбор кнопкой
-    buy_buyer_text = State()   # ждём ввод имени вручную
-    describe       = State()   # описание/фото к сделке
-    sell_price     = State()
+    buy_link   = State()
+    buy_price  = State()
+    describe   = State()   # описание/фото к сделке
+    sell_price = State()
+    sell_buyer = State()   # при продаже: кто байер
+    sell_flags = State()   # при продаже: этапы нашёл/поехал/продал
 
 
 # ── Хелперы ──────────────────────────────────────────────────────────────────
@@ -124,14 +125,24 @@ async def _is_operator(user_id: int) -> bool:
 
 
 async def _buyers_kb() -> InlineKeyboardMarkup:
+    """Выбор байера при продаже: из реестра + «без байера»."""
     buyers = await db.get_buyers()
     rows = [[InlineKeyboardButton(text=b["name"] or str(b["user_id"]),
                                   callback_data=f"bsel:{b['user_id']}")] for b in buyers]
-    rows.append([
-        InlineKeyboardButton(text="✍️ Другой", callback_data="bsel:other"),
-        InlineKeyboardButton(text="⏭ Пропустить", callback_data="bsel:skip"),
-    ])
+    rows.append([InlineKeyboardButton(text="🚫 Без байера", callback_data="bsel:none")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _flags_kb(found: bool, went: bool, sold: bool) -> InlineKeyboardMarkup:
+    """Тумблеры этапов участия байера + «Готово»."""
+    def mark(v):  # noqa
+        return "✅" if v else "⬜"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{mark(found)} 🔍 Нашёл",  callback_data="fl:found")],
+        [InlineKeyboardButton(text=f"{mark(went)} 🚗 Поехал",  callback_data="fl:went")],
+        [InlineKeyboardButton(text=f"{mark(sold)} 🤝 Продал",  callback_data="fl:sold")],
+        [InlineKeyboardButton(text="✅ Готово", callback_data="fldone")],
+    ])
 
 
 # ── Закуп ────────────────────────────────────────────────────────────────────
@@ -166,40 +177,14 @@ async def _got_buy_price(msg: Message, state: FSMContext):
         await msg.answer("Не понял цену. Пришли число, например 35000 или 35к.")
         return
     await state.update_data(buy_price=price)
-    await state.set_state(DealFSM.buy_buyer)
-    await msg.answer("👤 От кого закуп?", reply_markup=await _buyers_kb())
+    await _finalize_buy(msg, msg.from_user.id, state)
 
 
-async def _cb_buyer(cb: CallbackQuery, state: FSMContext):
-    val = cb.data.split(":", 1)[1]
-    if val == "skip":
-        await cb.answer()
-        await _finalize_buy(cb.message, cb.from_user.id, state, "", None)
-    elif val == "other":
-        await state.set_state(DealFSM.buy_buyer_text)
-        await cb.message.answer("👤 Впиши имя байера:", reply_markup=_cancel_menu())
-        await cb.answer()
-    else:
-        bid = int(val)
-        name = await db.buyer_name(bid) or str(bid)
-        await cb.answer()
-        await _finalize_buy(cb.message, cb.from_user.id, state, name, bid)
-
-
-async def _got_buyer_text(msg: Message, state: FSMContext):
-    name = (msg.text or "").strip()
-    if name in ("-", "—"):
-        name = ""
-    await _finalize_buy(msg, msg.from_user.id, state, name, None)
-
-
-async def _finalize_buy(dst: Message, reseller_id: int, state: FSMContext,
-                        buyer_hint: str, buyer_id: int | None):
+async def _finalize_buy(dst: Message, reseller_id: int, state: FSMContext):
     data = await state.get_data()
     url = data.get("url", "")
     price = data.get("buy_price", 0)
-    deal = await db.add_deal(url, price, reseller_id=reseller_id,
-                             buyer_hint=buyer_hint, buyer_id=buyer_id)
+    deal = await db.add_deal(url, price, reseller_id=reseller_id)
     await state.set_state(DealFSM.describe)
     await state.update_data(deal_id=deal["id"], note="")
 
@@ -207,11 +192,10 @@ async def _finalize_buy(dst: Message, reseller_id: int, state: FSMContext,
         head = f"✅ <b>Через бота</b> — при продаже засчитаю {int(FEE_RATE*100)}%\n<i>{_deal_label(deal)}</i>"
     else:
         head = "➖ <b>Не через бота</b> — 5% не берётся"
-    who = f" · от {buyer_hint}" if buyer_hint else ""
     await dst.answer(
-        f"{head}\n\nСделка <b>#{deal['id']}</b> · закуп {_money(price)}{who}\n\n"
+        f"{head}\n\nСделка <b>#{deal['id']}</b> · закуп {_money(price)}\n\n"
         f"📝 Опиши товар (текст) и/или пришли фото — для себя. "
-        f"Когда закончишь — жми <b>{BTN_DONE}</b>.",
+        f"Когда закончишь — жми <b>{BTN_DONE}</b>. Байера укажешь при продаже.",
         parse_mode="HTML", reply_markup=_done_menu(),
     )
 
@@ -285,32 +269,88 @@ async def _got_sell_price(msg: Message, state: FSMContext):
     if price is None:
         await msg.answer("Не понял цену. Пришли число, например 42000 или 42к.")
         return
+    await state.update_data(sell_price=price)
+    await state.set_state(DealFSM.sell_buyer)
+    await msg.answer("👤 Кто байер по этой продаже?", reply_markup=await _buyers_kb())
+
+
+async def _cb_sell_buyer(cb: CallbackQuery, state: FSMContext):
+    val = cb.data.split(":", 1)[1]
+    if val == "none":
+        buyer_id, name = None, ""
+    else:
+        buyer_id = int(val)
+        name = await db.buyer_name(buyer_id) or str(buyer_id)
+    await state.update_data(buyer_id=buyer_id, buyer_hint=name,
+                            f_found=False, f_went=False, f_sold=False)
+    await state.set_state(DealFSM.sell_flags)
+    who = name or "без байера"
+    await cb.message.answer(
+        f"Байер: <b>{_esc(who)}</b>\n"
+        f"Отметь этапы участия (нашёл/поехал/продал) и жми <b>Готово</b>.",
+        parse_mode="HTML", reply_markup=_flags_kb(False, False, False),
+    )
+    await cb.answer()
+
+
+async def _cb_flag_toggle(cb: CallbackQuery, state: FSMContext):
+    key = {"found": "f_found", "went": "f_went", "sold": "f_sold"}[cb.data.split(":", 1)[1]]
+    data = await state.get_data()
+    await state.update_data(**{key: not data.get(key, False)})
+    data = await state.get_data()
+    try:
+        await cb.message.edit_reply_markup(
+            reply_markup=_flags_kb(data.get("f_found"), data.get("f_went"), data.get("f_sold")))
+    except Exception:
+        pass
+    await cb.answer()
+
+
+async def _cb_flags_done(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     deal_id = data.get("deal_id")
+    price = data.get("sell_price")
+    buyer_id = data.get("buyer_id")
+    buyer_hint = data.get("buyer_hint", "")
+    f_found, f_went, f_sold = data.get("f_found"), data.get("f_went"), data.get("f_sold")
     await state.clear()
-    sold = await db.mark_deal_sold(deal_id, price)
-    if sold is None:
-        await msg.answer("Сделка не найдена или уже закрыта.", reply_markup=reseller_menu())
-        return
+    await cb.answer()
+    await _finalize_sell(cb.message, deal_id, price, buyer_id, buyer_hint, f_found, f_went, f_sold)
 
+
+async def _finalize_sell(dst: Message, deal_id, price, buyer_id, buyer_hint,
+                         f_found, f_went, f_sold):
+    sold = await db.mark_deal_sold(deal_id, price, buyer_id=buyer_id, buyer_hint=buyer_hint,
+                                   chk_found=f_found, chk_went=f_went, chk_sold=f_sold)
+    if sold is None:
+        await dst.answer("Сделка не найдена или уже закрыта.", reply_markup=reseller_menu())
+        return
     margin, fee = sold["margin"], sold["fee"]
+    buyer_share, reseller_share, steps = sold["buyer_share"], sold["reseller_share"], sold["steps"]
     src = "🤖 через бота" if sold["attributed"] else "➖ сам"
-    await msg.answer(
-        f"✅ Продано <b>#{deal_id}</b> ({src})\n"
-        f"Закуп {_money(sold['buy_price'])} → продажа {_money(price)}\n"
-        f"Маржа <b>{_money(margin)}</b>"
-        + (f" · доля владельца {_money(fee)}" if sold["attributed"] else ""),
-        parse_mode="HTML", reply_markup=reseller_menu(),
-    )
+    who = buyer_hint or "без байера"
+    checks = " ".join(x for x in ("🔍" if f_found else "", "🚗" if f_went else "",
+                                  "🤝" if f_sold else "") if x) or "—"
+    lines = [
+        f"✅ Продано <b>#{deal_id}</b> ({src})",
+        f"Закуп {_money(sold['buy_price'])} → продажа {_money(price)}",
+        f"Маржа <b>{_money(margin)}</b>",
+        f"👤 Байер: <b>{_esc(who)}</b> · этапы {steps}/3 {checks} → <b>{_money(buyer_share)}</b>",
+        f"🤝 Тебе (реселлер): <b>{_money(reseller_share)}</b>",
+    ]
+    if sold["attributed"]:
+        lines.append(f"💰 Владельцу ({int(FEE_RATE*100)}%): <b>{_money(fee)}</b>")
+    await dst.answer("\n".join(lines), parse_mode="HTML", reply_markup=reseller_menu())
 
     if sold["attributed"]:
         try:
-            await msg.bot.send_message(
+            await dst.bot.send_message(
                 OWNER_ID,
                 f"🟢 <b>Продажа через бота</b> · сделка #{deal_id}\n"
                 f"{_deal_label(sold)}\n"
                 f"Закуп {_money(sold['buy_price'])} → продажа {_money(price)}\n"
-                f"Маржа {_money(margin)} · <b>твои {int(FEE_RATE*100)}%: {_money(fee)}</b>",
+                f"Маржа {_money(margin)} · <b>твои {int(FEE_RATE*100)}%: {_money(fee)}</b>\n"
+                f"👤 {_esc(who)} ({steps}/3): {_money(buyer_share)} · реселлеру {_money(reseller_share)}",
                 parse_mode="HTML",
             )
         except Exception as e:
@@ -344,8 +384,15 @@ async def _cb_card(cb: CallbackQuery, state: FSMContext):
     src = "🤖 через бота" if d["attributed"] else "➖ сам"
     txt = f"<b>Сделка #{d['id']}</b> · {src}\n{_esc(_deal_label(d))}\nЗакуп: {_money(d['buy_price'])}"
     if d["status"] == "sold":
-        txt += f" → продажа {_money(d['sell_price'])} · 5% {_money(d.get('fee') or 0)}"
-    if d.get("buyer_hint"):
+        margin = (d.get("sell_price") or 0) - (d.get("buy_price") or 0)
+        steps = (d.get("chk_found") or 0) + (d.get("chk_went") or 0) + (d.get("chk_sold") or 0)
+        txt += f" → продажа {_money(d['sell_price'])}\nМаржа: {_money(margin)}"
+        if d.get("buyer_hint"):
+            txt += f"\n👤 Байер {_esc(d['buyer_hint'])} ({steps}/3): {_money(d.get('buyer_share') or 0)}"
+        txt += f"\n🤝 Реселлеру: {_money(d.get('reseller_share') or 0)}"
+        if d["attributed"]:
+            txt += f"\n💰 Владельцу {int(FEE_RATE*100)}%: {_money(d.get('fee') or 0)}"
+    elif d.get("buyer_hint"):
         txt += f"\nОт кого: {_esc(d['buyer_hint'])}"
     if d.get("note"):
         txt += f"\n📝 {_esc(d['note'])}"
@@ -493,6 +540,8 @@ async def _reseller_stats(msg: Message, state: FSMContext):
     lines += [
         f"\nПродано: <b>{r.get('sold_cnt', 0)}</b> (из них через бота: <b>{r.get('bot_sold', 0)}</b>)",
         f"Суммарная маржа: <b>{_money(r.get('margin', 0))}</b>",
+        f"🤝 Твой заработок (реселлер): <b>{_money(r.get('reseller_earned', 0))}</b>",
+        f"👤 Выплачено байерам: <b>{_money(r.get('buyer_paid', 0))}</b>",
         f"\n💰 Долг владельцу сейчас: <b>{_money(out)}</b>",
         f"Всего начислено 5%: <b>{_money(tot)}</b>",
     ]
@@ -500,7 +549,7 @@ async def _reseller_stats(msg: Message, state: FSMContext):
     if breakdown:
         lines.append("\n<b>По байерам:</b>")
         for b in breakdown[:10]:
-            lines.append(f"• {_esc(b['buyer'])}: {b['cnt']} сделок · маржа {_money(b['margin'])}")
+            lines.append(f"• {_esc(b['buyer'])}: {b['cnt']} сделок · заработал {_money(b['earned'])}")
     await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=reseller_menu())
 
 
@@ -647,7 +696,9 @@ def register_deal_handlers(dp):
     dp.message.register(_cmd_resellers,    Command("resellers"))
 
     # Инлайн-коллбэки.
-    dp.callback_query.register(_cb_buyer,     F.data.startswith("bsel:"), DealFSM.buy_buyer)
+    dp.callback_query.register(_cb_sell_buyer,  F.data.startswith("bsel:"), DealFSM.sell_buyer)
+    dp.callback_query.register(_cb_flags_done,  F.data == "fldone",         DealFSM.sell_flags)
+    dp.callback_query.register(_cb_flag_toggle, F.data.startswith("fl:"),   DealFSM.sell_flags)
     dp.callback_query.register(_cb_pick_sell, F.data.startswith("sell:"))
     dp.callback_query.register(_cb_drop,      F.data.startswith("dcancel:"))
     dp.callback_query.register(_cb_card,      F.data.startswith("card:"))
@@ -658,7 +709,6 @@ def register_deal_handlers(dp):
     # State-хэндлеры (после кнопок).
     dp.message.register(_got_link,        DealFSM.buy_link)
     dp.message.register(_got_buy_price,   DealFSM.buy_price)
-    dp.message.register(_got_buyer_text,  DealFSM.buy_buyer_text)
     dp.message.register(_describe_photo,  F.photo, DealFSM.describe)
     dp.message.register(_describe_text,   DealFSM.describe)
     dp.message.register(_got_sell_price,  DealFSM.sell_price)

@@ -15,6 +15,10 @@ OWNER_IDS = {OWNER_ID}
 
 FEE_RATE = 0.05  # доля владельца парсера с маржи по «ботовским» сделкам
 
+# Доля байера от маржи по числу выполненных этапов (нашёл / поехал / продал).
+# Твои 5% (FEE_RATE) при «через бота» вычитаются из доли байера.
+BUYER_SHARE_BY_STEPS = {3: 0.43, 2: 0.37, 1: 0.34, 0: 0.0}
+
 
 def extract_item_id(url: str) -> str | None:
     """Достаёт Avito item_id из ссылки объявления.
@@ -149,6 +153,12 @@ async def init_db():
             "ALTER TABLE deals ADD COLUMN settled INTEGER DEFAULT 0",
             "ALTER TABLE deals ADD COLUMN settled_at TIMESTAMP",
             "ALTER TABLE deals ADD COLUMN buyer_id INTEGER",
+            # Этапы участия байера (проставляются при продаже) + посчитанные доли.
+            "ALTER TABLE deals ADD COLUMN chk_found INTEGER DEFAULT 0",
+            "ALTER TABLE deals ADD COLUMN chk_went INTEGER DEFAULT 0",
+            "ALTER TABLE deals ADD COLUMN chk_sold INTEGER DEFAULT 0",
+            "ALTER TABLE deals ADD COLUMN buyer_share INTEGER",
+            "ALTER TABLE deals ADD COLUMN reseller_share INTEGER",
         ):
             try:
                 await db.execute(ddl)
@@ -546,8 +556,35 @@ async def add_deal(url: str, buy_price: int, reseller_id: int,
     }
 
 
-async def mark_deal_sold(deal_id: int, sell_price: int) -> dict | None:
-    """Закрывает сделку продажей, считает маржу и 5% (только для attributed)."""
+def split_margin(margin: int, attributed: bool, steps: int) -> dict:
+    """Делит маржу между байером, владельцем (5%) и реселлером.
+
+    • Байеру — BUYER_SHARE_BY_STEPS[steps] от маржи.
+    • Владельцу (тебе) — FEE_RATE от маржи, только если «через бота»;
+      эти 5% вычитаются из доли байера (клампим в 0, если доля меньше).
+    • Реселлеру (другу) — остаток.
+    Убыток (margin <= 0) целиком на реселлере, никто ничего не получает.
+    """
+    if margin <= 0:
+        return {"margin": margin, "fee": 0, "buyer_share": 0, "reseller_share": margin}
+    pct = BUYER_SHARE_BY_STEPS.get(steps, 0.0)
+    fee = round(margin * FEE_RATE) if attributed else 0
+    buyer_gross = round(margin * pct)
+    buyer_share = max(0, buyer_gross - fee) if attributed else buyer_gross
+    reseller_share = margin - buyer_share - fee
+    return {"margin": margin, "fee": fee,
+            "buyer_share": buyer_share, "reseller_share": reseller_share}
+
+
+async def mark_deal_sold(deal_id: int, sell_price: int, buyer_id: int | None = None,
+                         buyer_hint: str = "", chk_found: bool = False,
+                         chk_went: bool = False, chk_sold: bool = False) -> dict | None:
+    """Закрывает сделку продажей: считает маржу, доли байера/владельца/реселлера.
+
+    Байер и его этапы (нашёл/поехал/продал) задаются в момент продажи.
+    Твои 5% берутся с «ботовских» сделок и урезают долю байера.
+    """
+    steps = int(bool(chk_found)) + int(bool(chk_went)) + int(bool(chk_sold))
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)) as cur:
@@ -558,13 +595,20 @@ async def mark_deal_sold(deal_id: int, sell_price: int) -> dict | None:
         if deal["status"] == "sold":
             return None
         margin = (sell_price or 0) - (deal["buy_price"] or 0)
-        fee = round(margin * FEE_RATE) if deal["attributed"] and margin > 0 else 0
+        split = split_margin(margin, bool(deal["attributed"]), steps)
         await db.execute(
-            "UPDATE deals SET sell_price = ?, status = 'sold', fee = ?, sold_at = ? WHERE id = ?",
-            (sell_price, fee, datetime.now(timezone.utc).isoformat(), deal_id),
+            "UPDATE deals SET sell_price = ?, status = 'sold', fee = ?, sold_at = ?, "
+            "buyer_id = ?, buyer_hint = ?, chk_found = ?, chk_went = ?, chk_sold = ?, "
+            "buyer_share = ?, reseller_share = ? WHERE id = ?",
+            (sell_price, split["fee"], datetime.now(timezone.utc).isoformat(),
+             buyer_id, buyer_hint, int(bool(chk_found)), int(bool(chk_went)),
+             int(bool(chk_sold)), split["buyer_share"], split["reseller_share"], deal_id),
         )
         await db.commit()
-    deal.update(sell_price=sell_price, status="sold", fee=fee, margin=margin)
+    deal.update(sell_price=sell_price, status="sold", margin=margin, steps=steps,
+                buyer_id=buyer_id, buyer_hint=buyer_hint,
+                chk_found=int(bool(chk_found)), chk_went=int(bool(chk_went)),
+                chk_sold=int(bool(chk_sold)), **split)
     return deal
 
 
@@ -628,15 +672,17 @@ async def delete_deal(deal_id: int, reseller_id: int | None = None) -> bool:
 
 
 async def get_buyer_breakdown(reseller_id: int) -> list[dict]:
-    """Разбивка сделок реселлера по байерам: кто сколько принёс."""
+    """Разбивка проданных сделок реселлера по байерам: сколько сделок,
+    маржа и сколько заработал сам байер (buyer_share)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT COALESCE(NULLIF(TRIM(buyer_hint), ''), '—') AS buyer, "
             "  COUNT(*) AS cnt, "
-            "  COALESCE(SUM(CASE WHEN status='sold' THEN sell_price - buy_price END), 0) AS margin "
-            "FROM deals WHERE reseller_id = ? "
-            "GROUP BY buyer ORDER BY cnt DESC",
+            "  COALESCE(SUM(sell_price - buy_price), 0) AS margin, "
+            "  COALESCE(SUM(buyer_share), 0) AS earned "
+            "FROM deals WHERE reseller_id = ? AND status = 'sold' "
+            "GROUP BY buyer ORDER BY earned DESC",
             (reseller_id,),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -758,7 +804,9 @@ async def get_reseller_report(reseller_id: int) -> dict:
             "  COALESCE(SUM(status = 'sold'), 0)  AS sold_cnt, "
             "  COALESCE(SUM(CASE WHEN status='sold' THEN sell_price - buy_price END), 0) AS margin, "
             "  COALESCE(SUM(CASE WHEN status='sold' AND attributed=1 THEN 1 ELSE 0 END), 0) AS bot_sold, "
-            "  COALESCE(SUM(CASE WHEN status='sold' AND attributed=1 THEN fee END), 0)     AS fee "
+            "  COALESCE(SUM(CASE WHEN status='sold' AND attributed=1 THEN fee END), 0)     AS fee, "
+            "  COALESCE(SUM(CASE WHEN status='sold' THEN reseller_share END), 0)           AS reseller_earned, "
+            "  COALESCE(SUM(CASE WHEN status='sold' THEN buyer_share END), 0)              AS buyer_paid "
             "FROM deals WHERE reseller_id = ?",
             (reseller_id,),
         ) as cur:
