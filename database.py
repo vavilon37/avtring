@@ -605,7 +605,7 @@ async def mark_deal_sold(deal_id: int, sell_price: int, buyer_id: int | None = N
              int(bool(chk_sold)), split["buyer_share"], split["reseller_share"], deal_id),
         )
         await db.commit()
-    deal.update(sell_price=sell_price, status="sold", margin=margin, steps=steps,
+    deal.update(sell_price=sell_price, status="sold", steps=steps,
                 buyer_id=buyer_id, buyer_hint=buyer_hint,
                 chk_found=int(bool(chk_found)), chk_went=int(bool(chk_went)),
                 chk_sold=int(bool(chk_sold)), **split)
