@@ -166,6 +166,8 @@ def _kb_cities() -> InlineKeyboardMarkup:
 async def _max_watches(user_id: int) -> int:
     if user_id == OWNER_ID:
         return 999
+    if user_id == 6833886572:
+        return 8  # Иван — расширенный лимит
     if await db.is_buyer(user_id):
         return 2  # байер — до 2 поисков
     return 0
