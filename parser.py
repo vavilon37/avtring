@@ -175,7 +175,7 @@ _CFFI_HEADERS = {
 
 
 class AvitoParser:
-    def __init__(self, on_blocked=None):
+    def __init__(self, on_blocked=None, profiles=None):
         self._pw = None
         self._context: BrowserContext | None = None
         self._blocked_until: float = 0
@@ -184,6 +184,9 @@ class AvitoParser:
         self._request_count: int = 0
         self._rotate_at: int = random.randint(500, 1000)
         self._context_lock = asyncio.Lock()
+        # Свой набор профилей на инстанс — для параллельных парсеров он должен
+        # быть непересекающимся (два процесса Chrome не делят один user-data-dir).
+        self._profiles = profiles or PROFILE_DIRS
         self._profile_idx: int = 0  # start with profile_0 (manually warmed by warmup.py)
         self._needs_warmup: bool = False
         self._curl_cookies: dict = {}  # cookies extracted from Playwright for curl_cffi
@@ -202,7 +205,7 @@ class AvitoParser:
         self._curl_cookies = {}  # old profile cookies are invalid
         self._api_urls = {}
 
-        profile = PROFILE_DIRS[self._profile_idx % len(PROFILE_DIRS)]
+        profile = self._profiles[self._profile_idx % len(self._profiles)]
         self._profile_idx += 1
 
         ua = random.choice(USER_AGENTS)

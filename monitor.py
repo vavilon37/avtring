@@ -9,7 +9,7 @@ from aiogram.types import Message
 
 import database as db
 from database import FREE_INTERVAL, PAID_INTERVAL, OWNER_ID, mark_listings_seen
-from parser import AvitoParser, BLOCK_COOLDOWNS
+from parser import AvitoParser, BLOCK_COOLDOWNS, PROFILE_DIRS
 from bot import send_listing
 from listing_filter import filter_listings, filter_after_detail, listing_datetime, storage_matches
 
@@ -23,10 +23,13 @@ logger = logging.getLogger(__name__)
 class Monitor:
     def __init__(self, bot: Bot):
         self.bot = bot
+        # ТЕСТ: два параллельных парсера с непересекающимися пулами профилей
+        # Chrome (0-2 и 3-5). Чтобы вернуться к одному — оставь один элемент.
         self._parsers = [
-            AvitoParser(on_blocked=self._notify_blocked),
+            AvitoParser(on_blocked=self._notify_blocked, profiles=PROFILE_DIRS[:3]),
+            AvitoParser(on_blocked=self._notify_blocked, profiles=PROFILE_DIRS[3:]),
         ]
-        self._parsers_started = [False]
+        self._parsers_started = [False] * len(self._parsers)
         self._running = False
         self._paused = False  # парсер остановлен админом из панели
         self._task: asyncio.Task | None = None
@@ -260,21 +263,35 @@ class Monitor:
             random.shuffle(shuffled)
             logger.info(
                 f"Checking {len(paid_watches)} paid watches "
-                f"→ {len(url_groups)} unique URLs"
+                f"→ {len(url_groups)} unique URLs on {len(self._parsers)} parsers"
             )
-            parser = self._parsers[0]
-            processed = 0
+            # Раскидываем URL по парсерам (каждый — свой профиль Chrome) и гоняем
+            # бакеты параллельно; внутри бакета — последовательно с паузой.
+            buckets: list[list] = [[] for _ in self._parsers]
+            bi = 0
             for url, watchers in shuffled:
                 last_checked = self._url_last_checked.get(url, 0)
                 if now - last_checked < MIN_PAID_URL_INTERVAL:
                     logger.debug(f"Skip {url[:50]} — checked {now - last_checked:.0f}s ago")
                     continue
-                if processed > 0:
-                    await asyncio.sleep(random.uniform(1.0, 3.0) * self._delay_mult)
                 self._url_last_checked[url] = now
-                processed += 1
-                if await self._check_url_group(url, watchers, parser):
-                    found_any = True
+                buckets[bi % len(self._parsers)].append((url, watchers))
+                bi += 1
+
+            async def _run_bucket(parser, bucket):
+                found = False
+                for j, (url, watchers) in enumerate(bucket):
+                    if j > 0:
+                        await asyncio.sleep(random.uniform(1.0, 3.0) * self._delay_mult)
+                    if await self._check_url_group(url, watchers, parser):
+                        found = True
+                return found
+
+            results = await asyncio.gather(
+                *(_run_bucket(p, b) for p, b in zip(self._parsers, buckets) if b)
+            )
+            if any(results):
+                found_any = True
 
         if free_watches:
             last = getattr(self, "_last_free_check", 0)
