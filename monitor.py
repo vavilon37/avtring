@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 class Monitor:
     def __init__(self, bot: Bot):
         self.bot = bot
-        # ТЕСТ: два параллельных парсера с непересекающимися пулами профилей
-        # Chrome (0-2 и 3-5). Чтобы вернуться к одному — оставь один элемент.
+        # Один парсер (полный пул профилей). Монитор и _tick универсальны по
+        # числу парсеров: чтобы снова распараллелить — добавь второй элемент
+        # с непересекающимся пулом, напр. profiles=PROFILE_DIRS[3:].
         self._parsers = [
-            AvitoParser(on_blocked=self._notify_blocked, profiles=PROFILE_DIRS[:3]),
-            AvitoParser(on_blocked=self._notify_blocked, profiles=PROFILE_DIRS[3:]),
+            AvitoParser(on_blocked=self._notify_blocked),
         ]
         self._parsers_started = [False] * len(self._parsers)
         self._running = False
