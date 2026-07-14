@@ -12,7 +12,8 @@ logging.basicConfig(
 logger = logging.getLogger("watcher")
 
 POLL_INTERVAL = 30   # seconds between git pull checks
-RESTART_DELAY = 3    # seconds to wait before restarting after crash
+RESTART_DELAY = 8    # seconds before restart — даём Telegram отпустить старый
+                     # getUpdates, иначе новый инстанс ловит TelegramConflictError
 CWD = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -42,6 +43,17 @@ def start_bot() -> subprocess.Popen:
 
 
 def stop_bot(proc: subprocess.Popen):
+    # На Windows terminate() убивает только main.py, оставляя дочерние Chrome
+    # от Playwright осиротевшими — они копятся и жрут RAM. taskkill /T /F
+    # валит всё дерево процессов разом.
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        return
     proc.terminate()
     try:
         proc.wait(timeout=10)
